@@ -115,6 +115,7 @@ import com.hippo.ehviewer.client.exception.NoHathClientException
 import com.hippo.ehviewer.coil.PrefetchAround
 import com.hippo.ehviewer.coil.justDownload
 import com.hippo.ehviewer.collectAsState
+import com.hippo.ehviewer.download.AiProcessMode
 import com.hippo.ehviewer.download.DownloadManager
 import com.hippo.ehviewer.ktbuilder.executeIn
 import com.hippo.ehviewer.ktbuilder.imageRequest
@@ -250,7 +251,22 @@ fun GalleryDetailContent(
     fun onDownloadButtonClick() {
         galleryDetail ?: return
         if (DownloadManager.getDownloadState(galleryDetail.gid) == DownloadInfo.STATE_INVALID) {
-            launchUI { startDownload(false, galleryDetail.galleryInfo) }
+            launchUI {
+                val options = listOf(
+                    stringResource(R.string.download_option_plain),
+                    stringResource(R.string.download_option_ai_color),
+                    stringResource(R.string.download_option_ai_translate),
+                    stringResource(R.string.download_option_ai_full),
+                )
+                val selected = runCatching { awaitSelectItem(options, R.string.download) }.getOrElse { return@launchUI }
+                val aiMode = when (selected) {
+                    1 -> AiProcessMode.COLOR
+                    2 -> AiProcessMode.TRANSLATE
+                    3 -> AiProcessMode.FULL
+                    else -> AiProcessMode.NONE
+                }
+                startDownload(false, aiMode, galleryDetail.galleryInfo)
+            }
         } else {
             launch { confirmRemoveDownload(galleryDetail) }
         }

@@ -56,6 +56,8 @@ import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.client.EhEngine
 import com.hippo.ehviewer.client.EhUtils
 import com.hippo.ehviewer.client.exception.EhException
+import com.hippo.ehviewer.download.AiDownloadCoordinator
+import com.hippo.ehviewer.download.AiProcessMode
 import com.hippo.ehviewer.download.DownloadManager
 import com.hippo.ehviewer.download.DownloadService
 import com.hippo.ehviewer.download.downloadDir
@@ -115,7 +117,15 @@ suspend fun keepNoMediaFileStatus(downloadDir: Path = downloadLocation, mediaSca
 fun getFavoriteIcon(favorited: Boolean) = if (favorited) Icons.Default.Favorite else Icons.Default.FavoriteBorder
 
 context(_: DialogState, _: MainActivity)
-suspend fun startDownload(forceDefault: Boolean, vararg galleryInfos: BaseGalleryInfo) {
+suspend fun startDownload(forceDefault: Boolean, vararg galleryInfos: BaseGalleryInfo) =
+    startDownload(forceDefault, AiProcessMode.NONE, *galleryInfos)
+
+context(_: DialogState, _: MainActivity)
+suspend fun startDownload(
+    forceDefault: Boolean,
+    aiMode: AiProcessMode,
+    vararg galleryInfos: BaseGalleryInfo,
+) {
     if (isAtLeastT) {
         requestPermission(Manifest.permission.POST_NOTIFICATIONS)
     }
@@ -142,6 +152,9 @@ suspend fun startDownload(forceDefault: Boolean, vararg galleryInfos: BaseGaller
     if (justStart) {
         // Got default label
         for (gi in toAdd) {
+            if (aiMode != AiProcessMode.NONE) {
+                AiDownloadCoordinator.enqueue(gi, aiMode)
+            }
             DownloadService.startDownload(gi, label)
         }
         // Notify
@@ -163,6 +176,9 @@ suspend fun startDownload(forceDefault: Boolean, vararg galleryInfos: BaseGaller
         val label1 = if (selected == 0) null else items[selected].takeIf { DownloadManager.containLabel(it) }
         // Start download
         for (gi in toAdd) {
+            if (aiMode != AiProcessMode.NONE) {
+                AiDownloadCoordinator.enqueue(gi, aiMode)
+            }
             DownloadService.startDownload(gi, label1)
         }
         // Save settings

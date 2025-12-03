@@ -135,6 +135,13 @@ object Settings : DataStorePreferences(null) {
     val avatar = stringOrNullPref("avatar")
     val recentDownloadLabel = stringOrNullPref("recent_download_label")
 
+    // AI
+    val aiBaseUrl = stringOrNullPref("ai_base_url")
+    val aiApiKey = stringOrNullPref("ai_api_key")
+    val aiApiFormat = stringPref("ai_api_format", "gemini")
+    val aiDefaultModel = stringOrNullPref("ai_default_model")
+    val aiPendingTasks = stringSetPref("ai_pending_tasks")
+
     var downloadScheme by stringOrNullPref("image_scheme")
     var downloadAuthority by stringOrNullPref("image_authority")
     var downloadPath by stringOrNullPref("image_path")

@@ -298,6 +298,11 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
         }
     }
 
+    suspend fun addFinishedDownload(downloadInfoList: List<DownloadInfo>) {
+        addDownload(downloadInfoList)
+        downloadInfoList.forEach { mutableNotifyFlow.emit(it) }
+    }
+
     suspend fun addDownloadLabel(downloadLabelList: List<DownloadLabel>) {
         val offset = downloadLabelList.size
         downloadLabelList.forEachIndexed { index, label ->

@@ -365,6 +365,17 @@
     <string name="settings_download_clean_redundancy_summary">Remove gallery images which are not in download list but in download location</string>
     <string name="settings_download_clean_redundancy_no_redundancy">No redundancy</string>
     <string name="settings_download_clean_redundancy_done">Redundancy cleaning completed, clean-up %d items totally</string>
+    <string name="settings_ai">AI</string>
+    <string name="settings_ai_base_url">AI base URL</string>
+    <string name="settings_ai_base_url_placeholder">Leave blank to use default</string>
+    <string name="settings_ai_api_key">AI API key</string>
+    <string name="settings_ai_format">API provider</string>
+    <string name="settings_ai_default_model">Default model</string>
+    <string name="settings_ai_default_model_placeholder">Leave blank to use default</string>
+    <string name="download_option_plain">Download only</string>
+    <string name="download_option_ai_color">Download + AI color</string>
+    <string name="download_option_ai_translate">Download + AI translate</string>
+    <string name="download_option_ai_full">Download + AI color &amp; translate</string>
     <string name="settings_advanced">Advanced</string>
     <string name="settings_advanced_save_parse_error_body">Save HTML content when parsing error</string>
     <string name="settings_advanced_save_parse_error_body_summary">Html content may be privacy-sensitive</string>
