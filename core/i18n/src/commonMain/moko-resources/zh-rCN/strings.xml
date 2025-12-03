@@ -346,6 +346,17 @@
     <string name="settings_download_clean_redundancy_summary">清理下载目录中不在下载列表里的图片文件</string>
     <string name="settings_download_clean_redundancy_no_redundancy">未发现冗余</string>
     <string name="settings_download_clean_redundancy_done">完成冗余清理，共清理 %d 项</string>
+    <string name="settings_ai">AI</string>
+    <string name="settings_ai_base_url">AI 基础地址</string>
+    <string name="settings_ai_base_url_placeholder">留空以使用默认值</string>
+    <string name="settings_ai_api_key">AI API 密钥</string>
+    <string name="settings_ai_format">API 提供商</string>
+    <string name="settings_ai_default_model">默认模型</string>
+    <string name="settings_ai_default_model_placeholder">留空以使用默认值</string>
+    <string name="download_option_plain">仅下载</string>
+    <string name="download_option_ai_color">下载并上色</string>
+    <string name="download_option_ai_translate">下载并翻译</string>
+    <string name="download_option_ai_full">下载并上色+翻译</string>
     <string name="settings_advanced">高级</string>
     <string name="settings_advanced_save_parse_error_body">解析失败时保存页面内容</string>
     <string name="settings_advanced_save_parse_error_body_summary">页面内容可能含有隐私敏感信息</string>

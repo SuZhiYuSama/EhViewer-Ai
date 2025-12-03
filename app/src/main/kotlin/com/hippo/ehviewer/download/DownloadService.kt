@@ -338,6 +338,9 @@ class DownloadService :
                 .setNumber(sDownloadedCount)
             show()
         }
+        if (finish) {
+            AiDownloadCoordinator.onDownloadFinished(info)
+        }
         checkStopSelf()
     }
 

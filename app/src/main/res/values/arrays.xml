@@ -319,4 +319,14 @@
         <item>14</item>
         <item>30</item>
     </integer-array>
+
+    <string-array name="ai_api_format_entries">
+        <item>Gemini</item>
+        <item>OpenAI</item>
+    </string-array>
+
+    <string-array name="ai_api_format_entry_values">
+        <item>gemini</item>
+        <item>openai</item>
+    </string-array>
 </resources>
