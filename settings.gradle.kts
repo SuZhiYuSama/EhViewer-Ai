@@ -37,7 +37,7 @@ android {
     compileSdk = 36
     minSdk = 23
     targetSdk = 36
-    ndkVersion = "29.0.14206865"
+    ndkVersion = "26.1.10909125"
     buildToolsVersion = "36.0.0"
 }
 

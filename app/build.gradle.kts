@@ -70,6 +70,16 @@ android {
             }
             debugSymbolLevel = "FULL"
         }
+        // ↓↓↓↓↓↓ 请插入这段代码 (开始) ↓↓↓↓↓↓
+        externalNativeBuild {
+            cmake {
+                // 强制指定使用 Git Bash 的 sh.exe，解决 Windows 下误用 WSL 的问题
+                // 注意：路径必须使用正斜杠 /。请确认你的 Git 安装路径是否正确。
+                arguments += "-DSH_EXECUTABLE=C:/Program Files/Git/bin/sh.exe"
+                arguments += "-DCMAKE_SH=C:/Program Files/Git/bin/sh.exe"
+            }
+        }
+        // ↑↑↑↑↑↑ 请插入这段代码 (结束) ↑↑↑↑↑↑
     }
 
     flavorDimensions += "api"
