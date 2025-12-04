@@ -55,8 +55,15 @@ class BatchAiProcessor {
         }
 
         val results = mutableListOf<DownloadInfo>()
-
         var previousDir: File? = null
+
+        // 检查配置
+        val config = AiManagers.currentConfig()
+        if (config.apiKey.isNullOrBlank()) {
+            withContext(Dispatchers.Main) { listener.onError("未配置 AI API Key，无法开始处理。") }
+            return@withContext
+        }
+
         for (task in tasks) {
             val targetDir = createTargetDir(sourceDir, sourceInfo.findBaseInfo(), task)
             if (targetDir == null) {
@@ -65,9 +72,11 @@ class BatchAiProcessor {
             }
 
             val total = imageFiles.size
+            var failCount = 0
+
             for ((index, file) in imageFiles.withIndex()) {
                 withContext(Dispatchers.Main) {
-                    listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页...")
+                    listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页... (任务: ${task.desc})")
                 }
 
                 val fileName = file.name
@@ -81,7 +90,10 @@ class BatchAiProcessor {
                     else -> BitmapFactory.decodeFile(file.absolutePath)
                 }
 
-                if (sourceBitmap == null) continue
+                if (sourceBitmap == null) {
+                    Log.e("BatchAi", "Failed to decode bitmap: ${file.absolutePath}")
+                    continue
+                }
 
                 val prompt = if (task == ProcessTarget.ColorOnly) {
                     GeminiManager.PROMPT_COLORIZE
@@ -89,16 +101,32 @@ class BatchAiProcessor {
                     GeminiManager.PROMPT_TRANSLATE
                 }
 
-                val resultBitmap = runCatching {
-                    AiManagers.processBitmap(sourceBitmap, prompt).getOrThrow()
-                }.getOrElse {
-                    Log.e("BatchAi", "Page ${index + 1} failed", it)
+                // 核心修改：使用 try-catch 表达式直接赋值，移除 var 和后续的 null 判断
+                val resultBitmap = try {
+                    val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
+                    result.getOrThrow()
+                } catch (e: Exception) {
+                    Log.e("BatchAi", "Page ${index + 1} failed: ${e.message}", e)
+                    // 如果第一页就失败，或者连续失败，大概率是配置问题，直接中止
+                    if (index == 0 || failCount > 2) {
+                        withContext(Dispatchers.Main) {
+                            listener.onError("处理失败: ${e.message ?: "未知错误"}")
+                        }
+                        // 清理垃圾文件
+                        targetDir.deleteRecursively()
+                        return@withContext
+                    }
+                    failCount++
+                    // 单张失败可以使用原图（可选），这里为了强提醒，我们跳过保存，或者保存原图但计数
+                    // 选择保存原图以保持页码一致性
                     sourceBitmap
                 }
 
+                // 此时 resultBitmap 必定不为 null，直接调用保存
                 saveBitmap(targetDir, fileName, resultBitmap)
 
-                delay(1500)
+                // 避免 API 速率限制
+                delay(1000)
             }
 
             val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
@@ -185,8 +213,8 @@ enum class AiProcessMode {
     FULL,
 }
 
-private enum class ProcessTarget {
-    ColorOnly,
-    TranslateOnly,
-    TranslateFromColor,
+private enum class ProcessTarget(val desc: String) {
+    ColorOnly("上色"),
+    TranslateOnly("翻译"),
+    TranslateFromColor("翻译(基于上色)"),
 }

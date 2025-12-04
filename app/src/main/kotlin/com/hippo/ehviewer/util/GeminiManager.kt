@@ -39,7 +39,7 @@ object GeminiManager {
         prompt: String,
         modelId: String,
     ): Result<Bitmap> {
-        if (apiKey.isBlank()) return Result.failure(Exception("请先在设置中配置 AI API Key"))
+        if (apiKey.isBlank()) return Result.failure(IllegalStateException("未配置 AI API Key，请在设置中填写。"))
 
         return when (format) {
             AiApiFormat.GEMINI -> requestGemini(baseUrl, apiKey, originalImageBase64, prompt, modelId)
@@ -69,6 +69,7 @@ object GeminiManager {
                     }))
                 })
             }))
+            // 提示：并非所有模型都支持 responseModalities 为 IMAGE，如果报错请尝试移除此行或更换模型
             put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("IMAGE")))
         }
 
@@ -82,7 +83,11 @@ object GeminiManager {
                 val responseBody = response.body?.string() ?: ""
 
                 if (!response.isSuccessful) {
-                    val msg = if (response.code == 429) "API 请求过于频繁 (429)" else "HTTP ${response.code}"
+                    val msg = when (response.code) {
+                        401, 403 -> "API Key 无效或无权限 (HTTP ${response.code})"
+                        429 -> "请求过于频繁，请稍后再试 (429)"
+                        else -> "服务器返回错误: HTTP ${response.code}"
+                    }
                     Log.e(TAG, "API Error: $responseBody")
                     return@use Result.failure(Exception(msg))
                 }
@@ -90,7 +95,11 @@ object GeminiManager {
                 val root = JSONObject(responseBody)
                 val candidates = root.optJSONArray("candidates")
                 if (candidates == null || candidates.length() == 0) {
-                    return@use Result.failure(Exception("模型未返回结果"))
+                    // 检查是否有 promptFeedback (比如由于安全原因被拦截)
+                    val feedback = root.optJSONObject("promptFeedback")
+                    val blockReason = feedback?.optString("blockReason")
+                    val msg = if (blockReason != null) "生成被拦截: $blockReason" else "模型未返回结果"
+                    return@use Result.failure(Exception(msg))
                 }
 
                 val part = candidates.getJSONObject(0).optJSONObject("content")?.optJSONArray("parts")?.getJSONObject(0)
@@ -100,9 +109,14 @@ object GeminiManager {
                     val base64Data = inlineData.getString("data")
                     val decodedBytes = Base64.decode(base64Data, Base64.DEFAULT)
                     val resultBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+                    if (resultBitmap == null) {
+                        return@use Result.failure(Exception("无法解码返回的图片数据"))
+                    }
                     return@use Result.success(resultBitmap)
                 } else {
-                    return@use Result.failure(Exception("模型返回了文本而非图片"))
+                    val textData = part?.optString("text")
+                    val preview = textData?.take(50) ?: "无内容"
+                    return@use Result.failure(Exception("模型返回了文本而非图片: $preview... 请检查模型是否支持图片生成"))
                 }
             }
         } catch (e: Exception) {
@@ -147,7 +161,8 @@ object GeminiManager {
             client.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    throw IllegalStateException("HTTP ${response.code}: $responseBody")
+                    val msg = if (response.code == 401) "OpenAI API Key 无效" else "OpenAI Error ${response.code}"
+                    throw IllegalStateException("$msg: $responseBody")
                 }
                 val root = JSONObject(responseBody)
                 val dataArr = root.optJSONArray("data") ?: JSONArray()
@@ -157,6 +172,8 @@ object GeminiManager {
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     ?: error("无法解码返回的图片数据")
             }
+        }.onFailure {
+            Log.e(TAG, "OpenAI Request Failed", it)
         }
     }
 }
