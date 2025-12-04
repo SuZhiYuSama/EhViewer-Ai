@@ -176,6 +176,17 @@ fun GalleryDetailContent(
     modifier: Modifier,
 ) {
     val keylineMargin = dimensionResource(com.hippo.ehviewer.R.dimen.keyline_margin)
+    val stripItemPadding = dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding)
+    val stripItemPaddingV = dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding_v)
+
+    // 【关键修复 1】将资源获取移到 UI 构建层级，这里是安全的
+    val downloadOptions = listOf(
+        stringResource(R.string.download_option_plain),
+        stringResource(R.string.download_option_ai_color),
+        stringResource(R.string.download_option_ai_translate),
+        stringResource(R.string.download_option_ai_full),
+    )
+
     val galleryDetail = galleryInfo.asGalleryDetail()
     val windowSizeClass = LocalWindowSizeClass.current
     val thumbColumns by Settings.thumbColumns.collectAsState()
@@ -248,17 +259,14 @@ fun GalleryDetailContent(
             snackbar(filterAdded)
         }
     }
+
+    // 【关键修复 2】在点击事件中直接使用上面定义好的变量
     fun onDownloadButtonClick() {
         galleryDetail ?: return
         if (DownloadManager.getDownloadState(galleryDetail.gid) == DownloadInfo.STATE_INVALID) {
             launchUI {
-                val options = listOf(
-                    stringResource(R.string.download_option_plain),
-                    stringResource(R.string.download_option_ai_color),
-                    stringResource(R.string.download_option_ai_translate),
-                    stringResource(R.string.download_option_ai_full),
-                )
-                val selected = runCatching { awaitSelectItem(options, R.string.download) }.getOrElse { return@launchUI }
+                // 使用 downloadOptions 变量，而不是在这里调用 stringResource
+                val selected = runCatching { awaitSelectItem(downloadOptions, R.string.download) }.getOrElse { return@launchUI }
                 val aiMode = when (selected) {
                     1 -> AiProcessMode.COLOR
                     2 -> AiProcessMode.TRANSLATE
@@ -278,8 +286,8 @@ fun GalleryDetailContent(
             columns = GridCells.Fixed(thumbColumns),
             contentPadding = contentPadding,
             modifier = modifier.padding(horizontal = keylineMargin),
-            horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding)),
-            verticalArrangement = Arrangement.spacedBy(dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding_v)),
+            horizontalArrangement = Arrangement.spacedBy(stripItemPadding),
+            verticalArrangement = Arrangement.spacedBy(stripItemPaddingV),
         ) {
             item(
                 key = "header",
@@ -340,8 +348,8 @@ fun GalleryDetailContent(
             columns = GridCells.Fixed(thumbColumns),
             contentPadding = contentPadding,
             modifier = modifier.padding(horizontal = keylineMargin),
-            horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding)),
-            verticalArrangement = Arrangement.spacedBy(dimensionResource(id = com.hippo.ehviewer.R.dimen.strip_item_padding_v)),
+            horizontalArrangement = Arrangement.spacedBy(stripItemPadding),
+            verticalArrangement = Arrangement.spacedBy(stripItemPaddingV),
         ) {
             item(
                 key = "header",

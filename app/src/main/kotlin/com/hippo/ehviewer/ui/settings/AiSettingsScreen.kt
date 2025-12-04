@@ -23,7 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,7 +71,8 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     baseUrl = it
                     Settings.aiBaseUrl.value = it.ifBlank { null }
                 },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrect = false),
+                // 【修复验证】这里必须是 autoCorrectEnabled
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -84,7 +85,8 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     Settings.aiApiKey.value = it.ifBlank { null }
                 },
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrect = false),
+                // 【修复验证】这里必须是 autoCorrectEnabled
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             )
 
             Spacer(modifier = Modifier.height(12.dp))
