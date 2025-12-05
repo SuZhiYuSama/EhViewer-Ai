@@ -132,7 +132,13 @@ object GeminiManager {
         prompt: String,
         modelId: String,
     ): Result<Bitmap> {
-        val cleanBaseUrl = baseUrl.trim().removeSuffix("/")
+        var cleanBaseUrl = baseUrl.trim().removeSuffix("/")
+
+        // 修复逻辑：如果用户填写的 URL 已经包含了 /v1，则移除它，防止后续重复添加导致 /v1/v1
+        if (cleanBaseUrl.endsWith("/v1", ignoreCase = true)) {
+            cleanBaseUrl = cleanBaseUrl.substring(0, cleanBaseUrl.length - 3)
+        }
+
         val apiUrl = "$cleanBaseUrl/v1/images/edits"
 
         return runCatching {
