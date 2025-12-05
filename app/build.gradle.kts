@@ -249,6 +249,8 @@ dependencies {
 
     // 新增：解决 Icons.Default.Brush 找不到的问题
     implementation(libs.compose.material.icons.extended)
+    // 新增：解决 DocumentFile 找不到的问题
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     coreLibraryDesugaring(libs.desugar)
 
