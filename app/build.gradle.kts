@@ -70,7 +70,7 @@ android {
             }
             debugSymbolLevel = "FULL"
         }
-        // ↓↓↓↓↓↓ 请插入这段代码 (开始) ↓↓↓↓↓↓
+
         externalNativeBuild {
             cmake {
                 // 强制指定使用 Git Bash 的 sh.exe，解决 Windows 下误用 WSL 的问题
@@ -79,7 +79,6 @@ android {
                 arguments += "-DCMAKE_SH=C:/Program Files/Git/bin/sh.exe"
             }
         }
-        // ↑↑↑↑↑↑ 请插入这段代码 (结束) ↑↑↑↑↑↑
     }
 
     flavorDimensions += "api"
@@ -247,6 +246,9 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.datetime)
+
+    // 新增：解决 Icons.Default.Brush 找不到的问题
+    implementation(libs.compose.material.icons.extended)
 
     coreLibraryDesugaring(libs.desugar)
 

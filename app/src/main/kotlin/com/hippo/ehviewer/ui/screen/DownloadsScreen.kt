@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
@@ -114,6 +115,8 @@ import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.asMutableState
 import com.hippo.ehviewer.client.EhTagDatabase
 import com.hippo.ehviewer.collectAsState
+import com.hippo.ehviewer.download.AiDownloadCoordinator
+import com.hippo.ehviewer.download.AiProcessMode
 import com.hippo.ehviewer.download.DownloadManager
 import com.hippo.ehviewer.download.DownloadService
 import com.hippo.ehviewer.download.DownloadsFilterMode
@@ -140,6 +143,9 @@ import kotlinx.coroutines.delay
 import moe.tarsin.navigate
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
+
+// 修复点：确保这个常量定义在文件顶部，避免丢失
+private const val LABEL_PREFIX = "label:"
 
 @Destination<RootGraph>
 @Composable
@@ -749,8 +755,35 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                     }
                 }
             }
+
+            // AI Button with correct params
+            onClick(Icons.Default.Brush) {
+                val infoList = checkedInfoMap.values.toList()
+                if (infoList.isEmpty()) return@onClick
+
+                launch {
+                    val modes = listOf("AI 上色", "AI 翻译", "AI 上色 + 翻译")
+                    val selectedIndex = awaitSingleChoice(
+                        items = modes,
+                        selected = 0,
+                        title = R.string.settings_ai
+                    )
+
+                    val mode = when(selectedIndex) {
+                        0 -> AiProcessMode.COLOR
+                        1 -> AiProcessMode.TRANSLATE
+                        2 -> AiProcessMode.FULL
+                        else -> AiProcessMode.NONE
+                    }
+
+                    infoList.forEach { info ->
+                        if (info.state == DownloadInfo.STATE_FINISH) {
+                            AiDownloadCoordinator.startManualProcessing(info, mode)
+                        }
+                    }
+                    checkedInfoMap.clear()
+                }
+            }
         }
     }
 }
-
-private const val LABEL_PREFIX = "label:"

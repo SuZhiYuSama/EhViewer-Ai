@@ -4,7 +4,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
@@ -23,6 +26,7 @@ import splitties.init.appCtx
 object AiDownloadCoordinator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingTasks: MutableMap<Long, AiProcessMode> = mutableMapOf()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private const val NOTIFICATION_CHANNEL_ID = "ai_processing"
     private const val NOTIFICATION_ID_BASE = 10000
@@ -36,7 +40,7 @@ object AiDownloadCoordinator {
         val manager = NotificationManagerCompat.from(appCtx)
         val channel = NotificationChannelCompat.Builder(
             NOTIFICATION_CHANNEL_ID,
-            NotificationManagerCompat.IMPORTANCE_LOW // 进度通知使用 LOW 避免声音干扰
+            NotificationManagerCompat.IMPORTANCE_LOW
         ).setName("AI Processing")
             .setDescription("AI 图像处理进度与状态")
             .build()
@@ -59,7 +63,6 @@ object AiDownloadCoordinator {
     }
 
     fun enqueue(galleryInfo: BaseGalleryInfo, mode: AiProcessMode) {
-        // 在加入任务前进行简单的预检查，如果失败直接弹通知提醒
         val config = AiManagers.currentConfig()
         if (config.apiKey.isNullOrBlank()) {
             showErrorNotification(galleryInfo.gid.toInt(), "AI 任务添加失败", "请先在设置中配置 AI API Key")
@@ -69,6 +72,7 @@ object AiDownloadCoordinator {
         pendingTasks[galleryInfo.gid] = mode
         persistTasks()
         Log.i("AiDownload", "Task enqueued for GID: ${galleryInfo.gid}, Mode: $mode")
+        showToast("已加入 AI 处理队列")
     }
 
     fun onDownloadFinished(info: DownloadInfo) {
@@ -76,11 +80,27 @@ object AiDownloadCoordinator {
         persistTasks()
         if (info.state != DownloadInfo.STATE_FINISH) return
 
+        startManualProcessing(info, mode)
+    }
+
+    fun startManualProcessing(info: DownloadInfo, mode: AiProcessMode) {
+        if (mode == AiProcessMode.NONE) return
+
+        val config = AiManagers.currentConfig()
+        if (config.apiKey.isNullOrBlank()) {
+            showToast("请先配置 AI API Key")
+            return
+        }
+
         Log.i("AiDownload", "Starting AI processing for GID: ${info.gid}")
+        showToast("开始 AI 处理...")
 
         scope.launch {
             val processor = BatchAiProcessor()
             val notificationId = NOTIFICATION_ID_BASE + (info.gid % 1000).toInt()
+
+            // 初始通知
+            showProgressNotification(notificationId, "AI 准备中", "正在解析文件...", 0, 0)
 
             processor.processGallery(info, mode, object : BatchAiProcessor.ProgressListener {
                 override fun onProgress(current: Int, total: Int, message: String) {
@@ -101,10 +121,16 @@ object AiDownloadCoordinator {
         }
     }
 
+    private fun showToast(message: String) {
+        mainHandler.post {
+            Toast.makeText(appCtx, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun showProgressNotification(id: Int, title: String, content: String, current: Int, total: Int) {
         if (!checkPermission()) return
         val builder = NotificationCompat.Builder(appCtx, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload) // 使用系统上传图标作为临时图标
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle(title)
             .setContentText(content)
             .setProgress(total, current, false)
@@ -115,7 +141,10 @@ object AiDownloadCoordinator {
     }
 
     private fun showCompleteNotification(id: Int, title: String, content: String) {
-        if (!checkPermission()) return
+        if (!checkPermission()) {
+            showToast("$title: $content")
+            return
+        }
         val intent = Intent(appCtx, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -133,9 +162,12 @@ object AiDownloadCoordinator {
     }
 
     private fun showErrorNotification(id: Int, title: String, content: String) {
-        if (!checkPermission()) return
+        if (!checkPermission()) {
+            Log.w("AiDownload", "无通知权限，使用 Toast 显示错误: $content")
+            showToast("$title: $content")
+            return
+        }
 
-        // 点击通知跳转到主界面，理想情况下应跳转到 AI 设置页，但这里简化跳转到主页
         val intent = Intent(appCtx, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(appCtx, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
@@ -146,15 +178,19 @@ object AiDownloadCoordinator {
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH) // 错误通知高优先级
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
 
         NotificationManagerCompat.from(appCtx).notify(id, builder.build())
     }
 
     private fun checkPermission(): Boolean {
-        return ActivityCompat.checkSelfPermission(
+        val granted = ActivityCompat.checkSelfPermission(
             appCtx,
             android.Manifest.permission.POST_NOTIFICATIONS
         ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            Log.w("AiDownload", "缺少 POST_NOTIFICATIONS 权限，无法发送通知")
+        }
+        return granted
     }
 }

@@ -13,6 +13,7 @@ import com.hippo.ehviewer.util.FileUtils
 import com.hippo.ehviewer.util.GeminiManager
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -25,118 +26,163 @@ class BatchAiProcessor {
         fun onError(error: String)
     }
 
+    private interface ImageProvider : AutoCloseable {
+        val size: Int
+        fun getName(index: Int): String
+        fun getBitmap(index: Int): Bitmap?
+    }
+
+    private class DirImageProvider(private val dir: File) : ImageProvider {
+        private val files = dir.listFiles { file ->
+            val name = file.name.lowercase()
+            name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp")
+        }?.sortedBy(File::getName) ?: emptyList()
+
+        override val size: Int = files.size
+        override fun getName(index: Int) = files[index].name
+        override fun getBitmap(index: Int) = BitmapFactory.decodeFile(files[index].absolutePath)
+        override fun close() {}
+    }
+
+    private class ZipImageProvider(private val zipFile: File) : ImageProvider {
+        private val zip = ZipFile(zipFile)
+        private val entries = zip.entries().asSequence()
+            .filter { !it.isDirectory }
+            .filter {
+                val name = it.name.lowercase()
+                name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp")
+            }
+            .sortedBy { it.name }
+            .toList()
+
+        override val size: Int = entries.size
+        override fun getName(index: Int) = File(entries[index].name).name
+        override fun getBitmap(index: Int): Bitmap? {
+            return try {
+                zip.getInputStream(entries[index]).use { BitmapFactory.decodeStream(it) }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
+        }
+        override fun close() = zip.close()
+    }
+
     suspend fun processGallery(
         sourceInfo: DownloadInfo,
         mode: AiProcessMode,
         listener: ProgressListener,
     ) = withContext(Dispatchers.IO) {
-        val sourceDir = sourceInfo.downloadDir?.toFile()
+        val imageProvider = try {
+            val archive = sourceInfo.archiveFile?.toFile()
+            val dir = sourceInfo.downloadDir?.toFile()
 
-        if (sourceDir == null || !sourceDir.exists()) {
-            withContext(Dispatchers.Main) { listener.onError("找不到原始下载文件") }
+            when {
+                archive != null && archive.exists() -> ZipImageProvider(archive)
+                dir != null && dir.exists() -> DirImageProvider(dir)
+                else -> {
+                    withContext(Dispatchers.Main) { listener.onError("找不到源文件 (未发现目录或压缩包)") }
+                    return@withContext
+                }
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) { listener.onError("读取源文件失败: ${e.message}") }
             return@withContext
         }
 
-        val imageFiles = sourceDir.listFiles { file ->
-            val name = file.name.lowercase()
-            name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg")
-        }?.sortedBy(File::getName) ?: emptyList()
-
-        if (imageFiles.isEmpty()) {
-            withContext(Dispatchers.Main) { listener.onError("文件夹内无图片") }
-            return@withContext
-        }
-
-        val tasks = when (mode) {
-            AiProcessMode.COLOR -> listOf(ProcessTarget.ColorOnly)
-            AiProcessMode.TRANSLATE -> listOf(ProcessTarget.TranslateOnly)
-            AiProcessMode.FULL -> listOf(ProcessTarget.ColorOnly, ProcessTarget.TranslateFromColor)
-            else -> emptyList()
-        }
-
-        val results = mutableListOf<DownloadInfo>()
-        var previousDir: File? = null
-
-        // 检查配置
-        val config = AiManagers.currentConfig()
-        if (config.apiKey.isNullOrBlank()) {
-            withContext(Dispatchers.Main) { listener.onError("未配置 AI API Key，无法开始处理。") }
-            return@withContext
-        }
-
-        for (task in tasks) {
-            val targetDir = createTargetDir(sourceDir, sourceInfo.findBaseInfo(), task)
-            if (targetDir == null) {
-                withContext(Dispatchers.Main) { listener.onError("无法创建目标文件夹") }
+        imageProvider.use { provider ->
+            if (provider.size == 0) {
+                withContext(Dispatchers.Main) { listener.onError("源文件中没有图片") }
                 return@withContext
             }
 
-            val total = imageFiles.size
-            var failCount = 0
-
-            for ((index, file) in imageFiles.withIndex()) {
-                withContext(Dispatchers.Main) {
-                    listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页... (任务: ${task.desc})")
-                }
-
-                val fileName = file.name
-
-                val sourceBitmap = when (task) {
-                    ProcessTarget.TranslateFromColor -> {
-                        previousDir?.resolve(fileName)?.takeIf(File::exists)?.let { colorFile ->
-                            BitmapFactory.decodeFile(colorFile.absolutePath)
-                        }
-                    }
-                    else -> BitmapFactory.decodeFile(file.absolutePath)
-                }
-
-                if (sourceBitmap == null) {
-                    Log.e("BatchAi", "Failed to decode bitmap: ${file.absolutePath}")
-                    continue
-                }
-
-                val prompt = if (task == ProcessTarget.ColorOnly) {
-                    GeminiManager.PROMPT_COLORIZE
-                } else {
-                    GeminiManager.PROMPT_TRANSLATE
-                }
-
-                // 核心修改：使用 try-catch 表达式直接赋值，移除 var 和后续的 null 判断
-                val resultBitmap = try {
-                    val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
-                    result.getOrThrow()
-                } catch (e: Exception) {
-                    Log.e("BatchAi", "Page ${index + 1} failed: ${e.message}", e)
-                    // 如果第一页就失败，或者连续失败，大概率是配置问题，直接中止
-                    if (index == 0 || failCount > 2) {
-                        withContext(Dispatchers.Main) {
-                            listener.onError("处理失败: ${e.message ?: "未知错误"}")
-                        }
-                        // 清理垃圾文件
-                        targetDir.deleteRecursively()
-                        return@withContext
-                    }
-                    failCount++
-                    // 单张失败可以使用原图（可选），这里为了强提醒，我们跳过保存，或者保存原图但计数
-                    // 选择保存原图以保持页码一致性
-                    sourceBitmap
-                }
-
-                // 此时 resultBitmap 必定不为 null，直接调用保存
-                saveBitmap(targetDir, fileName, resultBitmap)
-
-                // 避免 API 速率限制
-                delay(1000)
+            val tasks = when (mode) {
+                AiProcessMode.COLOR -> listOf(ProcessTarget.ColorOnly)
+                AiProcessMode.TRANSLATE -> listOf(ProcessTarget.TranslateOnly)
+                AiProcessMode.FULL -> listOf(ProcessTarget.ColorOnly, ProcessTarget.TranslateFromColor)
+                else -> emptyList()
             }
 
-            val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
-            if (downloadInfo != null) {
-                results += downloadInfo
+            val results = mutableListOf<DownloadInfo>()
+            var previousDir: File? = null
+
+            val config = AiManagers.currentConfig()
+            if (config.apiKey.isNullOrBlank()) {
+                withContext(Dispatchers.Main) { listener.onError("未配置 AI API Key，无法开始处理。") }
+                return@withContext
             }
-            previousDir = targetDir
+
+            for (task in tasks) {
+                val sourceDirForNaming = sourceInfo.downloadDir?.toFile() ?: File(sourceInfo.dirname ?: "unknown")
+                val targetDir = createTargetDir(sourceDirForNaming, sourceInfo.findBaseInfo(), task)
+                if (targetDir == null) {
+                    withContext(Dispatchers.Main) { listener.onError("无法创建目标文件夹") }
+                    return@withContext
+                }
+
+                val total = provider.size
+                var failCount = 0
+
+                for (index in 0 until total) {
+                    val fileName = provider.getName(index)
+
+                    withContext(Dispatchers.Main) {
+                        listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页... (任务: ${task.desc})")
+                    }
+
+                    val sourceBitmap = when (task) {
+                        ProcessTarget.TranslateFromColor -> {
+                            previousDir?.resolve(fileName)?.takeIf(File::exists)?.let { colorFile ->
+                                BitmapFactory.decodeFile(colorFile.absolutePath)
+                            }
+                        }
+                        else -> provider.getBitmap(index)
+                    }
+
+                    if (sourceBitmap == null) {
+                        Log.e("BatchAi", "Failed to decode bitmap for $fileName")
+                        continue
+                    }
+
+                    val prompt = if (task == ProcessTarget.ColorOnly) {
+                        GeminiManager.PROMPT_COLORIZE
+                    } else {
+                        GeminiManager.PROMPT_TRANSLATE
+                    }
+
+                    // 修复：使用 val = try-catch 表达式，消除编译警告
+                    val resultBitmap = try {
+                        val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
+                        result.getOrThrow()
+                    } catch (e: Exception) {
+                        Log.e("BatchAi", "Page ${index + 1} failed: ${e.message}", e)
+                        if (index == 0 || failCount > 2) {
+                            withContext(Dispatchers.Main) {
+                                listener.onError("处理失败: ${e.message ?: "未知错误"}")
+                            }
+                            targetDir.deleteRecursively()
+                            return@withContext
+                        }
+                        failCount++
+                        sourceBitmap
+                    }
+
+                    saveBitmap(targetDir, fileName, resultBitmap)
+
+                    if (resultBitmap != sourceBitmap) {
+                        delay(1000)
+                    }
+                }
+
+                val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
+                if (downloadInfo != null) {
+                    results += downloadInfo
+                }
+                previousDir = targetDir
+            }
+
+            withContext(Dispatchers.Main) { listener.onComplete(results) }
         }
-
-        withContext(Dispatchers.Main) { listener.onComplete(results) }
     }
 
     private fun createTargetDir(
@@ -151,7 +197,8 @@ class BatchAiProcessor {
         }
         val newTitle = "$suffix ${sourceInfo.title ?: sourceInfo.gid}"
         val newDirName = FileUtils.sanitizeFilename(newTitle)
-        return sourceDir.parentFile?.resolve(newDirName)?.apply { mkdirs() }
+        val parent = if (sourceDir.isFile) sourceDir.parentFile else sourceDir.parentFile
+        return parent?.resolve(newDirName)?.apply { mkdirs() }
     }
 
     private fun saveBitmap(targetDir: File, name: String, bitmap: Bitmap) {
