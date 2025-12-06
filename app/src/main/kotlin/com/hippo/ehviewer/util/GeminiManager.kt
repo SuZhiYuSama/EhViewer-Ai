@@ -20,10 +20,11 @@ object GeminiManager {
 
     private const val TAG = "GeminiManager"
 
+    // 增加超时时间到 180秒，因为图片生成可能很慢
     private val client = OkHttpClient.Builder()
-        .connectTimeout(120, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
+        .connectTimeout(180, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(180, TimeUnit.SECONDS)
         .build()
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -86,6 +87,7 @@ object GeminiManager {
                     val msg = when (response.code) {
                         401, 403 -> "API Key 无效或无权限 (HTTP ${response.code})"
                         429 -> "请求过于频繁，请稍后再试 (429)"
+                        503 -> "AI 服务暂时不可用 (503)"
                         else -> "服务器返回错误: HTTP ${response.code}"
                     }
                     Log.e(TAG, "API Error: $responseBody")
@@ -95,10 +97,9 @@ object GeminiManager {
                 val root = JSONObject(responseBody)
                 val candidates = root.optJSONArray("candidates")
                 if (candidates == null || candidates.length() == 0) {
-                    // 检查是否有 promptFeedback (比如由于安全原因被拦截)
                     val feedback = root.optJSONObject("promptFeedback")
                     val blockReason = feedback?.optString("blockReason")
-                    val msg = if (blockReason != null) "生成被拦截: $blockReason" else "模型未返回结果"
+                    val msg = if (blockReason != null) "生成被拦截: $blockReason" else "模型未返回结果 (可能是模型不支持图片生成)"
                     return@use Result.failure(Exception(msg))
                 }
 
@@ -116,7 +117,7 @@ object GeminiManager {
                 } else {
                     val textData = part?.optString("text")
                     val preview = textData?.take(50) ?: "无内容"
-                    return@use Result.failure(Exception("模型返回了文本而非图片: $preview... 请检查模型是否支持图片生成"))
+                    return@use Result.failure(Exception("模型返回了文本而非图片: $preview... 请确认所选模型(如 $modelId)支持直接输出图片"))
                 }
             }
         } catch (e: Exception) {
@@ -134,11 +135,12 @@ object GeminiManager {
     ): Result<Bitmap> {
         var cleanBaseUrl = baseUrl.trim().removeSuffix("/")
 
-        // 修复逻辑：如果用户填写的 URL 已经包含了 /v1，则移除它，防止后续重复添加导致 /v1/v1
-        if (cleanBaseUrl.endsWith("/v1", ignoreCase = true)) {
+        // 更安全的 URL 处理逻辑：如果以 /v1 结尾，移除它，确保我们后续拼接正确
+        if (cleanBaseUrl.endsWith("/v1")) {
             cleanBaseUrl = cleanBaseUrl.substring(0, cleanBaseUrl.length - 3)
         }
 
+        // 使用 Edits 端点进行图生图
         val apiUrl = "$cleanBaseUrl/v1/images/edits"
 
         return runCatching {

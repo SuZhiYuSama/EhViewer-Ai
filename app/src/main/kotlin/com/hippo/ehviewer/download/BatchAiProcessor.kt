@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Environment
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.ehviewer.core.data.model.asEntity
@@ -40,7 +41,7 @@ class BatchAiProcessor {
     // 文件夹模式实现（支持 File 和 SAF Uri）
     private class DirImageProvider(private val context: Context, private val dirUri: Uri) : ImageProvider {
         private val docFile = DocumentFile.fromTreeUri(context, dirUri)
-            ?: DocumentFile.fromFile(File(dirUri.path!!)) // 回退到 file:// 兼容
+            ?: DocumentFile.fromFile(File(dirUri.path!!))
 
         private val files = docFile.listFiles().filter { file ->
             val name = file.name?.lowercase().orEmpty()
@@ -71,7 +72,6 @@ class BatchAiProcessor {
         private var entries: List<String> = emptyList()
 
         init {
-            // Java ZipFile 不支持 content:// URI，必须复制到本地临时文件
             try {
                 val temp = File.createTempFile("ai_process_", ".tmp", context.cacheDir)
                 context.contentResolver.openInputStream(zipUri)?.use { input ->
@@ -93,7 +93,7 @@ class BatchAiProcessor {
                     .toList()
             } catch (e: Exception) {
                 Log.e("BatchAi", "Failed to init ZipProvider", e)
-                close() // 清理
+                close()
                 throw e
             }
         }
@@ -101,7 +101,6 @@ class BatchAiProcessor {
         override val size: Int = entries.size
 
         override fun getName(index: Int): String {
-            // 移除压缩包内的目录前缀，只保留文件名
             return File(entries[index]).name
         }
 
@@ -128,32 +127,23 @@ class BatchAiProcessor {
         mode: AiProcessMode,
         listener: ProgressListener,
     ) = withContext(Dispatchers.IO) {
-        // 1. 智能识别源文件路径（修复找不到文件的问题）
         val imageProvider = try {
-            // 获取下载目录的 Uri (可能是 file:// 也可能是 content://)
             val downloadDirUri = sourceInfo.downloadDir?.toUri()
-
-            // 检查是否存在压缩包
             val archiveUri = sourceInfo.archiveFile?.toUri()
 
             when {
-                // 优先尝试读取压缩包
                 archiveUri != null -> {
-                    // 简单的存在性检查
                     val exists = try {
                         appCtx.contentResolver.openFileDescriptor(archiveUri, "r")?.close()
                         true
                     } catch (e: Exception) { false }
-
                     if (exists) ZipImageProvider(appCtx, archiveUri) else null
                 }
-                // 其次尝试读取目录
                 downloadDirUri != null -> {
                     val doc = DocumentFile.fromTreeUri(appCtx, downloadDirUri)
                     if (doc != null && doc.exists() && doc.isDirectory) {
                         DirImageProvider(appCtx, downloadDirUri)
                     } else if (File(downloadDirUri.path ?: "").exists()) {
-                        // 兼容纯 File 路径
                         DirImageProvider(appCtx, downloadDirUri)
                     } else {
                         null
@@ -177,7 +167,6 @@ class BatchAiProcessor {
                 return@withContext
             }
 
-            // 2. 确定任务流程
             val tasks = when (mode) {
                 AiProcessMode.COLOR -> listOf(ProcessTarget.ColorOnly)
                 AiProcessMode.TRANSLATE -> listOf(ProcessTarget.TranslateOnly)
@@ -186,7 +175,6 @@ class BatchAiProcessor {
             }
 
             val results = mutableListOf<DownloadInfo>()
-            // 用于链式任务（上色->翻译），存储上一步生成的 DocumentFile 目录
             var previousDir: DocumentFile? = null
 
             val config = AiManagers.currentConfig()
@@ -196,7 +184,6 @@ class BatchAiProcessor {
             }
 
             for (task in tasks) {
-                // 3. 创建目标目录 (支持 SAF)
                 val targetDir = createTargetDir(sourceInfo, task)
                 if (targetDir == null) {
                     withContext(Dispatchers.Main) { listener.onError("无法创建目标文件夹，请检查存储权限") }
@@ -213,10 +200,8 @@ class BatchAiProcessor {
                         listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页... (任务: ${task.desc})")
                     }
 
-                    // 确定源图片 Bitmap
                     val sourceBitmap = when (task) {
                         ProcessTarget.TranslateFromColor -> {
-                            // 从上一步的 SAF 目录读取
                             val file = previousDir?.findFile(fileName)
                             if (file != null) {
                                 appCtx.contentResolver.openInputStream(file.uri)?.use { BitmapFactory.decodeStream(it) }
@@ -238,7 +223,6 @@ class BatchAiProcessor {
                         GeminiManager.PROMPT_TRANSLATE
                     }
 
-                    // AI 处理
                     val resultBitmap = try {
                         val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
                         result.getOrThrow()
@@ -252,18 +236,17 @@ class BatchAiProcessor {
                             return@withContext
                         }
                         failCount++
-                        sourceBitmap // 失败回退
+                        sourceBitmap
                     }
 
-                    // 保存文件 (SAF 兼容)
                     saveBitmapToUri(targetDir, fileName, resultBitmap)
 
+                    // 关键修改：即使是在协程中，也增加延时，确保 API 不会因速率过快而报错 (429)
                     if (resultBitmap != sourceBitmap) {
-                        delay(1000)
+                        delay(2000)
                     }
                 }
 
-                // 注册到下载列表
                 val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
                 if (downloadInfo != null) {
                     results += downloadInfo
@@ -287,26 +270,26 @@ class BatchAiProcessor {
         val newTitle = "$suffix ${sourceInfo.title ?: sourceInfo.gid}"
         val newDirName = FileUtils.sanitizeFilename(newTitle)
 
-        // 寻找父目录来创建新目录
-        val downloadDirUri = sourceInfo.downloadDir?.toUri() ?: return null
-        val parentUri = if (sourceInfo.archiveFile != null) {
-            // 如果是压缩包，尝试获取其所在的父目录
-            // 此时 sourceInfo.downloadDir 指向的是具体画廊目录，但如果是CBZ模式，这个目录可能不存在或者就是CBZ所在的目录
-            // 回退策略：使用全局下载目录
-            downloadLocation.toUri()
-        } else {
-            // 如果是文件夹，获取其父目录
-            // File 路径处理
-            val file = File(downloadDirUri.path!!)
+        // 优先使用源文件的父目录
+        val downloadDirUri = sourceInfo.downloadDir?.toUri()
+        // 【修正】直接访问 downloadLocation，不需要 DownloadManager. 前缀
+        val defaultDownloadUri = downloadLocation.toUri()
+
+        val parentUri = if (downloadDirUri != null) {
+            val file = File(downloadDirUri.path ?: "")
             if (file.exists()) {
-                return DocumentFile.fromFile(file.parentFile!!).createDirectory(newDirName)
+                Uri.fromFile(file.parentFile)
+            } else {
+                // 如果是 SAF 路径，尝试获取其父级比较困难，简单起见使用全局配置的下载目录
+                defaultDownloadUri
             }
-            // SAF 处理：回退策略：直接在用户的【根下载目录】下创建
-            downloadLocation.toUri()
+        } else {
+            defaultDownloadUri
         }
 
+        // 使用 DocumentFile 操作
         val rootDoc = DocumentFile.fromTreeUri(appCtx, parentUri)
-            ?: DocumentFile.fromFile(File(parentUri.path!!))
+            ?: DocumentFile.fromFile(File(parentUri.path ?: Environment.getExternalStorageDirectory().path))
 
         return rootDoc.findFile(newDirName) ?: rootDoc.createDirectory(newDirName)
     }
@@ -354,7 +337,6 @@ class BatchAiProcessor {
         EhDB.putDownloadDirname(newGid, dirname)
         val info = DownloadInfo(newInfo.asEntity(), dirname)
         info.state = DownloadInfo.STATE_FINISH
-        // 重新计算文件数量
         val pageCount = targetDir.listFiles().size
         info.finished = pageCount
         info.total = pageCount

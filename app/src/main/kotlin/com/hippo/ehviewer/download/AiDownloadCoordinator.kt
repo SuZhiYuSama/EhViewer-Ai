@@ -1,7 +1,6 @@
 package com.hippo.ehviewer.download
 
 import android.app.PendingIntent
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Handler
@@ -20,6 +19,7 @@ import com.hippo.ehviewer.util.AiManagers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import splitties.init.appCtx
 
@@ -28,12 +28,30 @@ object AiDownloadCoordinator {
     private val pendingTasks: MutableMap<Long, AiProcessMode> = mutableMapOf()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // 创建一个无限容量的通道作为任务队列，确保串行执行
+    private val taskChannel = Channel<Pair<DownloadInfo, AiProcessMode>>(Channel.UNLIMITED)
+
     private const val NOTIFICATION_CHANNEL_ID = "ai_processing"
     private const val NOTIFICATION_ID_BASE = 10000
 
     init {
         restoreTasks()
         createNotificationChannel()
+        // 启动消费者协程，它会一直运行，等待通道里的新任务，并按顺序一个接一个处理
+        startTaskConsumer()
+    }
+
+    private fun startTaskConsumer() {
+        scope.launch {
+            for ((info, mode) in taskChannel) {
+                try {
+                    Log.i("AiDownload", "Processing task from queue: GID=${info.gid}")
+                    processSingleTask(info, mode)
+                } catch (e: Exception) {
+                    Log.e("AiDownload", "Task execution failed for GID=${info.gid}", e)
+                }
+            }
+        }
     }
 
     private fun createNotificationChannel() {
@@ -71,7 +89,7 @@ object AiDownloadCoordinator {
 
         pendingTasks[galleryInfo.gid] = mode
         persistTasks()
-        Log.i("AiDownload", "Task enqueued for GID: ${galleryInfo.gid}, Mode: $mode")
+        Log.i("AiDownload", "Task enqueued via download finish for GID: ${galleryInfo.gid}, Mode: $mode")
         showToast("已加入 AI 处理队列")
     }
 
@@ -92,33 +110,39 @@ object AiDownloadCoordinator {
             return
         }
 
-        Log.i("AiDownload", "Starting AI processing for GID: ${info.gid}")
-        showToast("开始 AI 处理...")
+        Log.i("AiDownload", "Queueing AI processing for GID: ${info.gid}")
+        showToast("已加入 AI 处理队列...")
 
-        scope.launch {
-            val processor = BatchAiProcessor()
-            val notificationId = NOTIFICATION_ID_BASE + (info.gid % 1000).toInt()
+        // 将任务发送到通道，而非直接启动协程处理
+        // trySend 可以在非挂起函数中使用
+        taskChannel.trySend(info to mode)
+    }
 
-            // 初始通知
-            showProgressNotification(notificationId, "AI 准备中", "正在解析文件...", 0, 0)
+    private suspend fun processSingleTask(info: DownloadInfo, mode: AiProcessMode) {
+        val processor = BatchAiProcessor()
+        val notificationId = NOTIFICATION_ID_BASE + (info.gid % 1000).toInt()
 
-            processor.processGallery(info, mode, object : BatchAiProcessor.ProgressListener {
-                override fun onProgress(current: Int, total: Int, message: String) {
-                    Log.d("AiDownload", "[$current/$total] $message")
-                    showProgressNotification(notificationId, "AI 处理中: ${info.label ?: info.gid}", message, current, total)
-                }
+        // 初始通知
+        showProgressNotification(notificationId, "AI 准备中", "正在解析文件...", 0, 0)
 
-                override fun onComplete(newInfo: List<DownloadInfo>) {
-                    Log.d("AiDownload", "AI processing completed for ${info.gid}")
-                    showCompleteNotification(notificationId, "AI 处理完成", "已生成 ${newInfo.size} 个新版本")
-                }
+        // 使用 suspendCoroutine 或者简单的回调包装来保持当前协程挂起，直到任务完成
+        // 这里 BatchAiProcessor.processGallery 是 suspend 函数，所以直接调用即可等待它完成
+        processor.processGallery(info, mode, object : BatchAiProcessor.ProgressListener {
+            override fun onProgress(current: Int, total: Int, message: String) {
+                Log.d("AiDownload", "[$current/$total] $message")
+                showProgressNotification(notificationId, "AI 处理中: ${info.label ?: info.gid}", message, current, total)
+            }
 
-                override fun onError(error: String) {
-                    Log.e("AiDownload", "AI processing failed: $error")
-                    showErrorNotification(notificationId, "AI 处理失败", error)
-                }
-            })
-        }
+            override fun onComplete(newInfo: List<DownloadInfo>) {
+                Log.d("AiDownload", "AI processing completed for ${info.gid}")
+                showCompleteNotification(notificationId, "AI 处理完成", "已生成 ${newInfo.size} 个新版本")
+            }
+
+            override fun onError(error: String) {
+                Log.e("AiDownload", "AI processing failed: $error")
+                showErrorNotification(notificationId, "AI 处理失败", error)
+            }
+        })
     }
 
     private fun showToast(message: String) {

@@ -71,7 +71,7 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     baseUrl = it
                     Settings.aiBaseUrl.value = it.ifBlank { null }
                 },
-                // 【修复验证】这里必须是 autoCorrectEnabled
+                // 【修复】参数名修正为 autoCorrectEnabled
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
             )
 
@@ -85,7 +85,7 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     Settings.aiApiKey.value = it.ifBlank { null }
                 },
                 visualTransformation = PasswordVisualTransformation(),
-                // 【修复验证】这里必须是 autoCorrectEnabled
+                // 【修复】参数名修正为 autoCorrectEnabled
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             )
 
