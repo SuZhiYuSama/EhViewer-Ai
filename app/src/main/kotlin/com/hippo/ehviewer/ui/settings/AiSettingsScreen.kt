@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -23,10 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.ehviewer.core.i18n.R
 import com.hippo.ehviewer.Settings
@@ -71,7 +71,7 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     baseUrl = it
                     Settings.aiBaseUrl.value = it.ifBlank { null }
                 },
-                // 【修复】参数名修正为 autoCorrectEnabled
+                // 修正参数名
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
             )
 
@@ -85,7 +85,7 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
                     Settings.aiApiKey.value = it.ifBlank { null }
                 },
                 visualTransformation = PasswordVisualTransformation(),
-                // 【修复】参数名修正为 autoCorrectEnabled
+                // 修正参数名
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             )
 
@@ -95,10 +95,12 @@ fun AnimatedVisibilityScope.AiSettingsScreen(navigator: DestinationsNavigator) =
             val formatValues = stringArrayResource(id = com.hippo.ehviewer.R.array.ai_api_format_entry_values)
             val formatMap = remember { formatValues.zip(formatEntries).toMap() }
             val formatState = Settings.aiApiFormat.asMutableState()
+
+            // 【修改】将标题直接硬编码为 "API 格式"
             DropdownListPreference(
                 state = formatState,
                 items = formatMap,
-                title = { Text(stringResource(id = R.string.settings_ai_format)) },
+                title = { Text("API 格式") },
                 summary = { Text(formatMap[formatState.value].orEmpty()) },
             )
 
