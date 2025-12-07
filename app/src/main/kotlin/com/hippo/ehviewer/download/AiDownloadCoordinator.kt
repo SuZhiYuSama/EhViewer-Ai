@@ -28,7 +28,7 @@ object AiDownloadCoordinator {
     private val pendingTasks: MutableMap<Long, AiProcessMode> = mutableMapOf()
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // 创建一个无限容量的通道作为任务队列，确保串行执行
+    // 任务队列
     private val taskChannel = Channel<Pair<DownloadInfo, AiProcessMode>>(Channel.UNLIMITED)
 
     private const val NOTIFICATION_CHANNEL_ID = "ai_processing"
@@ -37,18 +37,19 @@ object AiDownloadCoordinator {
     init {
         restoreTasks()
         createNotificationChannel()
-        // 启动消费者协程，它会一直运行，等待通道里的新任务，并按顺序一个接一个处理
         startTaskConsumer()
     }
 
     private fun startTaskConsumer() {
         scope.launch {
             for ((info, mode) in taskChannel) {
+                val notificationId = NOTIFICATION_ID_BASE + (info.gid % 1000).toInt()
                 try {
-                    Log.i("AiDownload", "Processing task from queue: GID=${info.gid}")
                     processSingleTask(info, mode)
                 } catch (e: Exception) {
-                    Log.e("AiDownload", "Task execution failed for GID=${info.gid}", e)
+                    // 【修复】捕获所有未处理异常，防止进度卡死
+                    Log.e("AiDownload", "Critical error in AI task", e)
+                    showErrorNotification(notificationId, "AI 处理异常中断", e.message ?: "未知错误")
                 }
             }
         }
@@ -89,7 +90,7 @@ object AiDownloadCoordinator {
 
         pendingTasks[galleryInfo.gid] = mode
         persistTasks()
-        Log.i("AiDownload", "Task enqueued via download finish for GID: ${galleryInfo.gid}, Mode: $mode")
+        Log.i("AiDownload", "Task enqueued for GID: ${galleryInfo.gid}, Mode: $mode")
         showToast("已加入 AI 处理队列")
     }
 
@@ -113,8 +114,6 @@ object AiDownloadCoordinator {
         Log.i("AiDownload", "Queueing AI processing for GID: ${info.gid}")
         showToast("已加入 AI 处理队列...")
 
-        // 将任务发送到通道，而非直接启动协程处理
-        // trySend 可以在非挂起函数中使用
         taskChannel.trySend(info to mode)
     }
 
@@ -122,11 +121,8 @@ object AiDownloadCoordinator {
         val processor = BatchAiProcessor()
         val notificationId = NOTIFICATION_ID_BASE + (info.gid % 1000).toInt()
 
-        // 初始通知
-        showProgressNotification(notificationId, "AI 准备中", "正在解析文件...", 0, 0)
+        showProgressNotification(notificationId, "AI 准备中", "正在初始化...", 0, 0)
 
-        // 使用 suspendCoroutine 或者简单的回调包装来保持当前协程挂起，直到任务完成
-        // 这里 BatchAiProcessor.processGallery 是 suspend 函数，所以直接调用即可等待它完成
         processor.processGallery(info, mode, object : BatchAiProcessor.ProgressListener {
             override fun onProgress(current: Int, total: Int, message: String) {
                 Log.d("AiDownload", "[$current/$total] $message")

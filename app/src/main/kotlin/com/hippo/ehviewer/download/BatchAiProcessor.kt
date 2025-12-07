@@ -18,7 +18,6 @@ import com.hippo.ehviewer.util.FileUtils
 import com.hippo.ehviewer.util.GeminiManager
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.io.OutputStream
 import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
@@ -34,27 +33,24 @@ class BatchAiProcessor {
         fun onError(error: String)
     }
 
+    // 抽象图片提供者，统一处理文件夹和压缩包
     private interface ImageProvider : AutoCloseable {
         val size: Int
         fun getName(index: Int): String
         fun getBitmap(index: Int): Bitmap?
-        fun copyRawTo(index: Int, outputStream: OutputStream) // 新增：用于快速复制文件流
+        fun copyRawTo(index: Int, outputStream: OutputStream)
     }
 
-    // 文件夹模式实现
     private class DirImageProvider(private val context: Context, private val dirUri: Uri) : ImageProvider {
         private val docFile = DocumentFile.fromTreeUri(context, dirUri)
             ?: DocumentFile.fromFile(File(dirUri.path!!))
 
-        // 动态获取文件列表，确保替换后能读取到最新状态（如果需要）
-        // 但为了性能和顺序稳定性，我们最好缓存文件名列表
         private val files = docFile.listFiles().filter { file ->
             val name = file.name?.lowercase().orEmpty()
             name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp")
         }.sortedBy { it.name }
 
         override val size: Int = files.size
-
         override fun getName(index: Int) = files[index].name ?: "image_$index.jpg"
 
         override fun getBitmap(index: Int): Bitmap? {
@@ -62,22 +58,16 @@ class BatchAiProcessor {
                 context.contentResolver.openInputStream(files[index].uri)?.use {
                     BitmapFactory.decodeStream(it)
                 }
-            } catch (e: Exception) {
-                Log.e("BatchAi", "Failed to load image from dir", e)
-                null
-            }
+            } catch (e: Exception) { null }
         }
 
         override fun copyRawTo(index: Int, outputStream: OutputStream) {
-            context.contentResolver.openInputStream(files[index].uri)?.use { input ->
-                input.copyTo(outputStream)
-            }
+            context.contentResolver.openInputStream(files[index].uri)?.use { it.copyTo(outputStream) }
         }
 
         override fun close() {}
     }
 
-    // 压缩包模式实现
     private class ZipImageProvider(private val context: Context, private val zipUri: Uri) : ImageProvider {
         private var tempFile: File? = null
         private var zipFile: ZipFile? = null
@@ -87,9 +77,7 @@ class BatchAiProcessor {
             try {
                 val temp = File.createTempFile("ai_process_", ".tmp", context.cacheDir)
                 context.contentResolver.openInputStream(zipUri)?.use { input ->
-                    FileOutputStream(temp).use { output ->
-                        input.copyTo(output)
-                    }
+                    FileOutputStream(temp).use { output -> input.copyTo(output) }
                 }
                 tempFile = temp
                 val zip = ZipFile(temp)
@@ -104,28 +92,22 @@ class BatchAiProcessor {
                     .sorted()
                     .toList()
             } catch (e: Exception) {
-                Log.e("BatchAi", "Failed to init ZipProvider", e)
                 close()
                 throw e
             }
         }
 
         override val size: Int = entries.size
-
         override fun getName(index: Int): String = File(entries[index]).name
 
         override fun getBitmap(index: Int): Bitmap? {
             return try {
-                zipFile?.getInputStream(zipFile?.getEntry(entries[index]))?.use {
-                    BitmapFactory.decodeStream(it)
-                }
+                zipFile?.getInputStream(zipFile?.getEntry(entries[index]))?.use { BitmapFactory.decodeStream(it) }
             } catch (e: Exception) { null }
         }
 
         override fun copyRawTo(index: Int, outputStream: OutputStream) {
-            zipFile?.getInputStream(zipFile?.getEntry(entries[index]))?.use { input ->
-                input.copyTo(outputStream)
-            }
+            zipFile?.getInputStream(zipFile?.getEntry(entries[index]))?.use { it.copyTo(outputStream) }
         }
 
         override fun close() {
@@ -139,11 +121,11 @@ class BatchAiProcessor {
         mode: AiProcessMode,
         listener: ProgressListener,
     ) = withContext(Dispatchers.IO) {
-        // 1. 初始化源图提供者（用于第一次复制）
+        // 1. 准备源文件读取器
         val sourceProvider = try {
             createImageProvider(sourceInfo)
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { listener.onError("读取源文件出错: ${e.message}") }
+            withContext(Dispatchers.Main) { listener.onError("读取源文件失败: ${e.message}") }
             return@withContext
         }
 
@@ -161,27 +143,40 @@ class BatchAiProcessor {
             }
 
             val results = mutableListOf<DownloadInfo>()
-
-            // 记录上一个任务的目标目录，用于链式处理（上色 -> 翻译）
-            // 如果是第一个任务，上一级目录就是原始 ImageProvider 的逻辑（通过 copyFiles 处理）
-            // 但为了统一逻辑，我们采用“先复制到目标目录，然后就地修改”的策略
-
             val config = AiManagers.currentConfig()
+
             if (config.apiKey.isNullOrBlank()) {
                 withContext(Dispatchers.Main) { listener.onError("未配置 AI API Key") }
                 return@withContext
             }
 
+            // 用于链式任务传递结果（上色 -> 翻译）
+            var previousResultInfo: DownloadInfo? = null
+
             for (task in tasks) {
-                // 2. 准备目标画廊（创建目录、复制文件、注册数据库）
-                val targetDir = prepareTargetGallery(sourceInfo, task, initialProvider, results.lastOrNull())
+                // 2. 准备目标画廊（核心逻辑：新建目录、注册DB、复制原图）
+                // 如果是链式第二步，应该基于上一步的结果作为源
+                val currentSourceProvider = if (task == ProcessTarget.TranslateFromColor && previousResultInfo != null) {
+                    // 这种情况下，源头变成了上一步生成的文件夹
+                    // 但为了简单，prepareTargetGallery 内部会处理文件复制
+                    null
+                } else {
+                    initialProvider
+                }
+
+                val targetDir = prepareTargetGallery(sourceInfo, task, currentSourceProvider, previousResultInfo)
 
                 if (targetDir == null) {
-                    withContext(Dispatchers.Main) { listener.onError("无法创建画廊目录") }
+                    withContext(Dispatchers.Main) { listener.onError("无法创建目标目录，请检查权限") }
                     return@withContext
                 }
 
-                // 3. 读取进度（断点续传）
+                // 3. 注册或获取 DownloadInfo，让用户立刻可见
+                val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
+                results.add(downloadInfo)
+                previousResultInfo = downloadInfo
+
+                // 4. 读取断点进度
                 val progressFile = targetDir.findFile(".ai_progress")
                 val startIndex = try {
                     if (progressFile != null) {
@@ -189,72 +184,65 @@ class BatchAiProcessor {
                     } else 0
                 } catch (e: Exception) { 0 }
 
-                // 4. 创建工作目录的 ImageProvider (读写都在这个新目录进行)
+                // 5. 在新目录上进行“原地修改”
+                // 此时 targetDir 里已经有了所有图片（要么是刚复制的，要么是上次处理一半的）
                 val workingProvider = DirImageProvider(appCtx, targetDir.uri)
                 val total = workingProvider.size
 
                 if (startIndex >= total) {
-                    // 任务已完成，直接注册结果并跳过
-                    Log.i("BatchAi", "Task ${task.desc} already completed ($startIndex/$total)")
+                    Log.i("BatchAi", "Task ${task.desc} already finished. Skipping.")
                     continue
                 }
 
-                Log.i("BatchAi", "Resuming task ${task.desc} from index $startIndex")
-
+                Log.i("BatchAi", "Starting task ${task.desc} from index $startIndex")
                 var failCount = 0
 
                 for (index in startIndex until total) {
                     val fileName = workingProvider.getName(index)
 
                     withContext(Dispatchers.Main) {
-                        listener.onProgress(index + 1, total, "正在处理第 ${index + 1} 页... (任务: ${task.desc})")
+                        listener.onProgress(index + 1, total, "正在处理 ${index + 1}/$total (任务: ${task.desc})")
                     }
 
-                    // 从工作目录读取图片（此时是上一步的结果，或者是刚刚复制过来的原图）
+                    // 读取当前图片（可能是原图，也可能是待处理图）
                     val sourceBitmap = workingProvider.getBitmap(index)
-
                     if (sourceBitmap == null) {
-                        Log.e("BatchAi", "Failed to read bitmap $fileName from working dir")
+                        Log.e("BatchAi", "Cannot read bitmap $fileName")
                         continue
                     }
 
-                    val prompt = if (task == ProcessTarget.ColorOnly) {
-                        GeminiManager.PROMPT_COLORIZE
-                    } else {
-                        GeminiManager.PROMPT_TRANSLATE
-                    }
+                    val prompt = if (task == ProcessTarget.ColorOnly) GeminiManager.PROMPT_COLORIZE else GeminiManager.PROMPT_TRANSLATE
 
-                    // AI 处理
+                    // AI 请求
                     val resultBitmap = try {
                         val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
                         result.getOrThrow()
                     } catch (e: Exception) {
-                        Log.e("BatchAi", "Page ${index + 1} failed: ${e.message}", e)
-                        // 【需求一】取消失败后的删除操作。只记录错误，不回滚。
-                        // 如果连续失败太多，暂停任务而不是删除文件
+                        Log.e("BatchAi", "Page $index error: ${e.message}")
+                        // 失败策略：保留原图，记录错误。如果连续失败太多则暂停
                         if (failCount > 4) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("连续失败多次，任务已暂停。已处理的图片已保存，下次可继续。错误: ${e.message}")
+                                listener.onError("连续失败多次，任务暂停。进度已保存。错误: ${e.message}")
                             }
                             return@withContext
                         }
                         failCount++
-                        sourceBitmap // 失败回退使用原图
+                        sourceBitmap // 回退使用原图，保证文件不损坏
                     }
 
-                    // 【逻辑核心】就地替换：保存回目标目录，覆盖原文件
+                    // 覆盖保存
                     saveBitmapToUri(targetDir, fileName, resultBitmap)
 
-                    // 【需求三】保存进度标记
+                    // 记录进度
                     saveProgress(targetDir, index + 1)
 
                     if (resultBitmap != sourceBitmap) {
-                        delay(1000) // 基础限流
-                        failCount = 0 // 重置失败计数
+                        delay(1000) // 避免速率限制
+                        failCount = 0
                     }
                 }
 
-                // 任务完成，删除进度文件
+                // 任务完成，清理进度文件
                 try { targetDir.findFile(".ai_progress")?.delete() } catch (_: Exception) {}
             }
 
@@ -265,10 +253,10 @@ class BatchAiProcessor {
     private suspend fun prepareTargetGallery(
         sourceInfo: DownloadInfo,
         task: ProcessTarget,
-        initialProvider: ImageProvider,
-        previousResult: DownloadInfo? // 如果是链式任务的第二步，输入来源于上一步的结果
+        initialProvider: ImageProvider?,
+        previousResult: DownloadInfo?
     ): DocumentFile? {
-        // 1. 计算新目录名称
+        // 1. 确定目录名
         val suffix = when (task) {
             ProcessTarget.ColorOnly -> "[AI-Color]"
             ProcessTarget.TranslateOnly -> "[AI-TL]"
@@ -277,137 +265,112 @@ class BatchAiProcessor {
         val newTitle = "$suffix ${sourceInfo.title ?: sourceInfo.gid}"
         val newDirName = FileUtils.sanitizeFilename(newTitle)
 
-        // 2. 寻找或创建目录
-        // [修复] downloadLocation 是顶层属性，直接使用
+        // 2. 获取下载根目录 (使用顶层变量 downloadLocation)
         val downloadDirUri = downloadLocation.toUri()
         val rootDoc = DocumentFile.fromTreeUri(appCtx, downloadDirUri)
             ?: DocumentFile.fromFile(File(downloadDirUri.path ?: Environment.getExternalStorageDirectory().path))
 
+        // 3. 检查目录是否存在
         var targetDir = rootDoc.findFile(newDirName)
-        val isResume = targetDir != null
+        val isResume = targetDir != null && (targetDir.listFiles().isNotEmpty())
 
         if (targetDir == null) {
             targetDir = rootDoc.createDirectory(newDirName) ?: return null
         }
 
-        // 3. 【需求二】提前注册到画廊列表
-        // 无论是否是续传，都尝试注册一下，确保它出现在列表中
-        val registeredInfo = registerAsDownload(targetDir!!, sourceInfo.findBaseInfo(), task)
-
-        // 4. 如果是新建目录，或者目录为空，执行“全量复制”
-        // 逻辑：如果是链式任务的第二步(TranslateFromColor)，应该从上一步的目录复制
-        // 如果是第一步，从 initialProvider 复制
-        val filesCount = targetDir.listFiles().size
-        if (!isResume || filesCount == 0) {
-            Log.i("BatchAi", "Initializing gallery content for ${task.desc}...")
+        // 4. 如果不是断点续传（目录为空），则执行全量复制初始化
+        if (!isResume) {
+            Log.i("BatchAi", "Initializing target dir: $newDirName")
 
             if (task == ProcessTarget.TranslateFromColor && previousResult != null) {
-                // 从上一步的结果目录复制
-                val prevDir = previousResult.downloadDir?.let { DocumentFile.fromTreeUri(appCtx, it.toUri()) }
-                // [修复] 使用 toString() 获取路径字符串，因为 Okio Path 没有 .path 属性
-                    ?: DocumentFile.fromFile(File(previousResult.downloadDir!!.toString()))
+                // 链式任务：从上一步的结果目录复制
+                val prevUri = previousResult.downloadDir?.toUri() ?: return null
+                val prevDoc = DocumentFile.fromTreeUri(appCtx, prevUri) ?: return null
 
-                val prevFiles = prevDir.listFiles().filter { it.name?.endsWith(".ai_progress") == false }
-
-                prevFiles.forEach { file ->
-                    val destFile = targetDir.createFile(file.type ?: "image/jpeg", file.name!!)
-                    if (destFile != null) {
-                        appCtx.contentResolver.openInputStream(file.uri)?.use { input ->
-                            appCtx.contentResolver.openOutputStream(destFile.uri)?.use { output ->
-                                input.copyTo(output)
-                            }
-                        }
+                prevDoc.listFiles().forEach { f ->
+                    if (f.name?.endsWith(".ai_progress") == false && f.isFile) {
+                        copyFile(f, targetDir!!)
                     }
                 }
-            } else {
-                // 从源头复制 (Zip 或 文件夹)
+            } else if (initialProvider != null) {
+                // 初始任务：从 ImageProvider (Zip/Dir) 复制
                 for (i in 0 until initialProvider.size) {
                     val name = initialProvider.getName(i)
                     val destFile = targetDir.createFile("image/jpeg", name)
                     if (destFile != null) {
-                        appCtx.contentResolver.openOutputStream(destFile.uri)?.use { output ->
-                            initialProvider.copyRawTo(i, output)
+                        appCtx.contentResolver.openOutputStream(destFile.uri)?.use { out ->
+                            initialProvider.copyRawTo(i, out)
                         }
                     }
                 }
             }
         }
-
         return targetDir
+    }
+
+    private fun copyFile(src: DocumentFile, destDir: DocumentFile) {
+        val dest = destDir.createFile(src.type ?: "application/octet-stream", src.name ?: "temp") ?: return
+        try {
+            appCtx.contentResolver.openInputStream(src.uri)?.use { input ->
+                appCtx.contentResolver.openOutputStream(dest.uri)?.use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("BatchAi", "Copy failed", e)
+        }
+    }
+
+    private fun createImageProvider(info: DownloadInfo): ImageProvider? {
+        val dirUri = info.downloadDir?.toUri()
+        val archiveUri = info.archiveFile?.toUri()
+
+        return when {
+            archiveUri != null -> ZipImageProvider(appCtx, archiveUri)
+            dirUri != null -> DirImageProvider(appCtx, dirUri)
+            else -> null
+        }
+    }
+
+    private fun saveBitmapToUri(dir: DocumentFile, name: String, bitmap: Bitmap) {
+        // "wt" 模式会截断现有文件进行覆盖
+        val file = dir.findFile(name) ?: dir.createFile("image/jpeg", name) ?: return
+        appCtx.contentResolver.openOutputStream(file.uri, "wt")?.use {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)
+        }
     }
 
     private fun saveProgress(dir: DocumentFile, index: Int) {
         try {
             val file = dir.findFile(".ai_progress") ?: dir.createFile("text/plain", ".ai_progress")
             file?.let {
-                appCtx.contentResolver.openOutputStream(it.uri, "wt")?.use { os ->
-                    os.write(index.toString().toByteArray())
+                appCtx.contentResolver.openOutputStream(it.uri, "wt")?.use { out ->
+                    out.write(index.toString().toByteArray())
                 }
             }
-        } catch (e: Exception) {
-            Log.w("BatchAi", "Failed to save progress", e)
-        }
-    }
-
-    private fun createTargetDir(sourceInfo: DownloadInfo, task: ProcessTarget): DocumentFile? {
-        // 此方法已整合到 prepareTargetGallery 中，保留空实现或删除均可，为防报错保留个空壳
-        return null
-    }
-
-    private fun createImageProvider(sourceInfo: DownloadInfo): ImageProvider? {
-        val downloadDirUri = sourceInfo.downloadDir?.toUri()
-        val archiveUri = sourceInfo.archiveFile?.toUri()
-
-        return when {
-            archiveUri != null -> {
-                val exists = try {
-                    appCtx.contentResolver.openFileDescriptor(archiveUri, "r")?.close()
-                    true
-                } catch (e: Exception) { false }
-                if (exists) ZipImageProvider(appCtx, archiveUri) else null
-            }
-            downloadDirUri != null -> {
-                val doc = DocumentFile.fromTreeUri(appCtx, downloadDirUri)
-                if (doc != null && doc.exists() && doc.isDirectory) {
-                    DirImageProvider(appCtx, downloadDirUri)
-                } else if (File(downloadDirUri.path ?: "").exists()) {
-                    DirImageProvider(appCtx, downloadDirUri)
-                } else {
-                    null
-                }
-            }
-            else -> null
-        }
-    }
-
-    private fun saveBitmapToUri(dir: DocumentFile, name: String, bitmap: Bitmap) {
-        // 查找现有文件并覆盖
-        val file = dir.findFile(name) ?: dir.createFile("image/jpeg", name) ?: return
-        appCtx.contentResolver.openOutputStream(file.uri, "wt")?.use { os ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, os)
-        }
+        } catch (e: Exception) { Log.w("BatchAi", "Save progress failed", e) }
     }
 
     private suspend fun registerAsDownload(
         targetDir: DocumentFile,
         sourceInfo: BaseGalleryInfo,
-        task: ProcessTarget,
-    ): DownloadInfo? {
+        task: ProcessTarget
+    ): DownloadInfo {
         val newGid = when (task) {
             ProcessTarget.ColorOnly -> sourceInfo.gid * 10 + 1
             ProcessTarget.TranslateOnly -> sourceInfo.gid * 10 + 2
             ProcessTarget.TranslateFromColor -> sourceInfo.gid * 10 + 3
         }
 
-        // 检查是否已存在，使用 DownloadManager 缓存
-        // [修复] EhDB 没有 getDownloadInfo，使用 DownloadManager.getDownloadInfo
-        val existInfo = DownloadManager.getDownloadInfo(newGid)
-        if (existInfo != null) return existInfo
+        // 尝试从 DownloadManager 缓存获取，如果已存在直接返回
+        val cached = DownloadManager.getDownloadInfo(newGid)
+        if (cached != null) return cached
 
+        // 构建新信息
         val newInfo = BaseGalleryInfo(
             gid = newGid,
             token = sourceInfo.token,
-            title = targetDir.name ?: "Unknown",
+            title = targetDir.name ?: "AI Generated",
             titleJpn = sourceInfo.titleJpn,
             thumbKey = sourceInfo.thumbKey,
             category = sourceInfo.category,
@@ -426,18 +389,15 @@ class BatchAiProcessor {
             favoriteNote = sourceInfo.favoriteNote,
         )
 
-        val dirname = targetDir.name ?: return null
+        val dirname = targetDir.name ?: "unknown"
         EhDB.putDownloadDirname(newGid, dirname)
         val info = DownloadInfo(newInfo.asEntity(), dirname)
 
-        // 【需求二】标记为 AI进行中
-        info.state = DownloadInfo.STATE_FINISH // 设为 Finish 才能在列表看到
-        info.label = "AI进行中" // 使用标签区分状态
-
-        val pageCount = targetDir.listFiles().size
-        info.finished = pageCount
-        info.total = pageCount
-        info.downloaded = pageCount
+        // 关键：设为 FINISH 状态才能显示在列表中，但用 Label 区分
+        info.state = DownloadInfo.STATE_FINISH
+        info.label = "AI处理中..."
+        info.total = targetDir.listFiles().size
+        info.finished = 0 // 或者读取进度
 
         DownloadManager.addFinishedDownload(listOf(info))
         return info
