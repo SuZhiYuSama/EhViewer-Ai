@@ -324,8 +324,14 @@ class BatchAiProcessor {
                 }
             } else if (initialProvider != null) {
                 for (i in 0 until initialProvider.size) {
-                    val name = initialProvider.getName(i)
-                    val destFile = targetDir.createFile("image/jpeg", name)
+                    // 【修复核心】获取原始文件名并强制清洗
+                    val rawName = initialProvider.getName(i)
+                    // 使用 FileUtils.sanitizeFilename 清洗文件名，如果清洗后为空则生成默认名
+                    val safeName = FileUtils.sanitizeFilename(rawName).let {
+                        if (it.isBlank()) "image_$i.jpg" else it
+                    }
+
+                    val destFile = targetDir.createFile("image/jpeg", safeName)
                     if (destFile != null) {
                         appCtx.contentResolver.openOutputStream(destFile.uri)?.use { out ->
                             initialProvider.copyRawTo(i, out)
@@ -338,7 +344,11 @@ class BatchAiProcessor {
     }
 
     private fun copyFile(src: DocumentFile, destDir: DocumentFile) {
-        val dest = destDir.createFile(src.type ?: "application/octet-stream", src.name ?: "temp") ?: return
+        // 【修复】复制文件时也进行文件名清洗
+        val rawName = src.name ?: "temp"
+        val safeName = FileUtils.sanitizeFilename(rawName)
+
+        val dest = destDir.createFile(src.type ?: "application/octet-stream", safeName) ?: return
         try {
             appCtx.contentResolver.openInputStream(src.uri)?.use { input ->
                 appCtx.contentResolver.openOutputStream(dest.uri)?.use { output ->
