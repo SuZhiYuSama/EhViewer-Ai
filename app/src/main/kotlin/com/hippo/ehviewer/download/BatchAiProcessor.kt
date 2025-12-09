@@ -45,24 +45,27 @@ class BatchAiProcessor {
         private val docFile = DocumentFile.fromTreeUri(context, dirUri)
             ?: DocumentFile.fromFile(File(dirUri.path!!))
 
+        // 过滤掉隐藏文件和非图片文件，防止 .ai_progress 等文件干扰索引
         private val files = docFile.listFiles().filter { file ->
             val name = file.name?.lowercase().orEmpty()
-            name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp")
+            !name.startsWith(".") && (name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp"))
         }.sortedBy { it.name }
 
         override val size: Int = files.size
-        override fun getName(index: Int) = files[index].name ?: "image_$index.jpg"
+        override fun getName(index: Int) = files.getOrNull(index)?.name ?: "image_$index.jpg"
 
         override fun getBitmap(index: Int): Bitmap? {
+            val file = files.getOrNull(index) ?: return null
             return try {
-                context.contentResolver.openInputStream(files[index].uri)?.use {
+                context.contentResolver.openInputStream(file.uri)?.use {
                     BitmapFactory.decodeStream(it)
                 }
             } catch (e: Exception) { null }
         }
 
         override fun copyRawTo(index: Int, outputStream: OutputStream) {
-            context.contentResolver.openInputStream(files[index].uri)?.use { it.copyTo(outputStream) }
+            val file = files.getOrNull(index) ?: return
+            context.contentResolver.openInputStream(file.uri)?.use { it.copyTo(outputStream) }
         }
 
         override fun close() {}
@@ -87,7 +90,7 @@ class BatchAiProcessor {
                     .filter { !it.isDirectory }
                     .filter {
                         val name = it.name.lowercase()
-                        name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp")
+                        !name.startsWith(".") && (name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp"))
                     }
                     .map { it.name }
                     .sorted()
@@ -164,7 +167,7 @@ class BatchAiProcessor {
                 val targetDir = prepareTargetGallery(sourceInfo, task, currentSourceProvider, previousResultInfo)
 
                 if (targetDir == null) {
-                    withContext(Dispatchers.Main) { listener.onError("无法创建目标目录") }
+                    withContext(Dispatchers.Main) { listener.onError("无法创建目标目录，请检查存储权限") }
                     return@withContext
                 }
 
@@ -202,7 +205,7 @@ class BatchAiProcessor {
 
                     val sourceBitmap = workingProvider.getBitmap(index)
                     if (sourceBitmap == null) {
-                        Log.e("BatchAi", "Cannot read bitmap $fileName")
+                        Log.e("BatchAi", "Cannot read bitmap $fileName, skipping.")
                         continue
                     }
 
@@ -211,13 +214,14 @@ class BatchAiProcessor {
                     val resultBitmap = try {
                         val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
                         result.getOrThrow()
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Log.e("BatchAi", "Page $index error", e)
-                        // 捕获 Unreachable 或其他严重错误
+
                         val errMsg = e.message ?: "Unknown Error"
+                        // 针对性提示 Unreachable 错误
                         if (errMsg.contains("Unreachable")) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("遇到内部错误(Unreachable)，请尝试更换 AI 模型或 API 格式。")
+                                listener.onError("遇到底层错误(Unreachable)，通常是由于文件名包含非法字符。已尝试修复，请重试任务。")
                             }
                             return@withContext
                         }
@@ -229,7 +233,7 @@ class BatchAiProcessor {
                             return@withContext
                         }
                         failCount++
-                        sourceBitmap // 回退
+                        sourceBitmap // 失败则回退原图
                     }
 
                     saveBitmapToUri(targetDir, fileName, resultBitmap)
@@ -260,30 +264,40 @@ class BatchAiProcessor {
             ProcessTarget.TranslateFromColor -> "[AI-Color+TL]"
         }
 
-        // 【核心修复】更强力的文件名清洗，防止换行符等导致“名字不对”的文件夹
+        // 【文件名清洗】移除换行符等非法字符，防止 Unreachable 错误
         val rawTitle = sourceInfo.title ?: sourceInfo.gid.toString()
-        val cleanTitle = rawTitle.replace("\n", " ").replace("\r", "").trim().take(50) // 限制长度
+        // 替换掉所有不可见字符和换行符，并截断长度
+        val cleanTitle = rawTitle.replace(Regex("[\\x00-\\x1F\\x7F]+"), " ").trim().take(64)
         val newTitle = "$suffix $cleanTitle"
         val safeDirName = FileUtils.sanitizeFilename(newTitle)
 
-        // 【核心修复】获取下载根目录
+        // 【核心修正】直接访问 downloadLocation，不需要 DownloadManager. 前缀
         val downloadDirUri = downloadLocation.toUri()
+
         val rootDoc = DocumentFile.fromTreeUri(appCtx, downloadDirUri)
             ?: DocumentFile.fromFile(File(downloadDirUri.path ?: Environment.getExternalStorageDirectory().path))
 
-        // 【核心修复】智能查找：不只匹配名字，如果能找到包含 GID 和 Suffix 的现有目录，优先复用
-        // 这样可以找回之前因为名字乱码而“丢失”的进度
+        // 【智能查找】优先查找名字干净的现有目录
         var targetDir = rootDoc.findFile(safeDirName)
 
+        // 如果没找到，尝试进行模糊匹配（兼容旧版本或脏名字）
         if (targetDir == null) {
-            // 尝试模糊搜索：遍历目录，寻找包含 "[AI-Color]" 和 GID 的文件夹
             val searchKey = "${sourceInfo.gid}"
             val existing = rootDoc.listFiles().find {
-                it.isDirectory && (it.name?.contains(suffix) == true) && (it.name?.contains(searchKey) == true)
+                it.isDirectory &&
+                        (it.name?.contains(suffix) == true) &&
+                        (it.name?.contains(searchKey) == true)
             }
+            // 如果找到了旧目录，判断是否复用
             if (existing != null) {
-                Log.i("BatchAi", "Found existing directory by fuzzy match: ${existing.name}")
-                targetDir = existing
+                val existingName = existing.name ?: ""
+                // 如果旧目录名包含换行符，视为"脏目录"，不复用，强制新建（这样就能解决 Unreachable 问题）
+                if (existingName.contains("\n") || existingName.contains("\r")) {
+                    Log.w("BatchAi", "Ignoring dirty directory: $existingName")
+                } else {
+                    Log.i("BatchAi", "Resuming from existing directory: $existingName")
+                    targetDir = existing
+                }
             }
         }
 
@@ -296,11 +310,16 @@ class BatchAiProcessor {
         if (!isResume) {
             Log.i("BatchAi", "Initializing target dir: ${targetDir.name}")
             if (task == ProcessTarget.TranslateFromColor && previousResult != null) {
-                val prevUri = previousResult.downloadDir?.toUri() ?: return null
-                val prevDoc = DocumentFile.fromTreeUri(appCtx, prevUri) ?: return null
-                prevDoc.listFiles().forEach { f ->
-                    if (f.name?.endsWith(".ai_progress") == false && f.isFile) {
-                        copyFile(f, targetDir!!)
+                val prevUri = previousResult.downloadDir?.toUri()
+                // 确保我们能获取到上一步的 DocumentFile
+                if (prevUri != null) {
+                    val prevDoc = DocumentFile.fromTreeUri(appCtx, prevUri)
+                        ?: DocumentFile.fromFile(File(prevUri.path ?: ""))
+
+                    prevDoc.listFiles().forEach { f ->
+                        if (f.name?.endsWith(".ai_progress") == false && f.isFile) {
+                            copyFile(f, targetDir!!)
+                        }
                     }
                 }
             } else if (initialProvider != null) {
