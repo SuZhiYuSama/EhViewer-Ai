@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
+import android.system.ErrnoException
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.ehviewer.core.data.model.asEntity
@@ -18,9 +19,15 @@ import com.hippo.ehviewer.util.FileUtils
 import com.hippo.ehviewer.util.GeminiManager
 import java.io.File
 import java.io.FileOutputStream
-import java.io.OutputStream
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.io.OutputStream
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.zip.ZipFile
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -129,12 +136,12 @@ class BatchAiProcessor {
         val sourceProvider = try {
             createImageProvider(sourceInfo)
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { listener.onError("读取源文件失败: ${e.message}") }
+            withContext(Dispatchers.Main) { listener.onError("【读取错误】源文件无法读取\n详情: ${e.message}") }
             return@withContext
         }
 
         if (sourceProvider == null || sourceProvider.size == 0) {
-            withContext(Dispatchers.Main) { listener.onError("找不到源图片") }
+            withContext(Dispatchers.Main) { listener.onError("【读取错误】找不到源图片\n请确认画廊已下载完成且包含图片。") }
             return@withContext
         }
 
@@ -150,30 +157,34 @@ class BatchAiProcessor {
             val config = AiManagers.currentConfig()
 
             if (config.apiKey.isNullOrBlank()) {
-                withContext(Dispatchers.Main) { listener.onError("未配置 AI API Key") }
+                withContext(Dispatchers.Main) { listener.onError("【配置错误】未设置 API Key\n请前往 设置 -> AI 填写密钥。") }
                 return@withContext
             }
 
             var previousResultInfo: DownloadInfo? = null
 
             for (task in tasks) {
+                // 如果是链式第二步，应该基于上一步的结果作为源
                 val currentSourceProvider = if (task == ProcessTarget.TranslateFromColor && previousResultInfo != null) {
                     null
                 } else {
                     initialProvider
                 }
 
+                // 2. 准备目标画廊
                 val targetDir = prepareTargetGallery(sourceInfo, task, currentSourceProvider, previousResultInfo)
 
                 if (targetDir == null) {
-                    withContext(Dispatchers.Main) { listener.onError("无法创建目标目录，请检查存储权限") }
+                    withContext(Dispatchers.Main) { listener.onError("【存储错误】无法创建目标目录\n请检查存储权限或剩余空间。") }
                     return@withContext
                 }
 
+                // 3. 注册到列表
                 val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
                 results.add(downloadInfo)
                 previousResultInfo = downloadInfo
 
+                // 4. 读取断点进度
                 val progressFile = targetDir.findFile(".ai_progress")
                 val startIndex = try {
                     if (progressFile != null) {
@@ -181,6 +192,7 @@ class BatchAiProcessor {
                     } else 0
                 } catch (e: Exception) { 0 }
 
+                // 5. 准备处理
                 val workingProvider = DirImageProvider(appCtx, targetDir.uri)
                 val total = workingProvider.size
 
@@ -207,47 +219,39 @@ class BatchAiProcessor {
 
                     val prompt = if (task == ProcessTarget.ColorOnly) GeminiManager.PROMPT_COLORIZE else GeminiManager.PROMPT_TRANSLATE
 
-                    // 【关键修复】将 saveBitmapToUri 移入 try 块，并区分错误类型
                     val processedBitmap = try {
+                        // 【核心修改】将 API 请求与文件保存放入同一 Try 块，以便统一捕获
                         val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
                         val bitmap = result.getOrThrow()
 
-                        // 尝试保存（如果文件名有问题，这里会抛出 IOException）
+                        // 立即保存结果，任何IO错误也会被捕获
                         saveBitmapToUri(targetDir, fileName, bitmap)
                         saveProgress(targetDir, index + 1)
-                        bitmap
+
+                        bitmap // 返回成功处理后的图片
                     } catch (e: Throwable) {
                         Log.e("BatchAi", "Page $index error", e)
-                        val errMsg = e.message ?: "Unknown Error"
 
-                        // 区分网络错误和文件错误
-                        val isNetworkUnreachable = errMsg.contains("Unreachable", ignoreCase = true) ||
-                                e is java.net.SocketException ||
-                                e is java.net.UnknownHostException
+                        // 【错误诊断】
+                        val errorReport = diagnoseError(e, fileName)
 
-                        if (isNetworkUnreachable) {
+                        // 如果是严重的网络不可达错误，直接中断
+                        if (errorReport.isFatal) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("网络连接失败(Unreachable)。请检查VPN连接或代理设置。")
+                                listener.onError(errorReport.message)
                             }
                             return@withContext
                         }
 
-                        // 如果是保存文件时的错误（通常不会触发，因为我们在 prepare 时已经清洗了文件名，但以防万一）
-                        if (e is IOException && errMsg.contains("EPERM") || errMsg.contains("EROFS")) {
-                            withContext(Dispatchers.Main) {
-                                listener.onError("文件保存失败: $fileName。请检查存储权限。")
-                            }
-                            return@withContext
-                        }
-
+                        // 普通错误（如单张图片解码失败或瞬时网络抖动），尝试重试
                         if (failCount > 4) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("连续多次处理失败，任务暂停。错误: $errMsg")
+                                listener.onError("【任务中断】连续失败多次\n最后一次错误: ${errorReport.title}\n${errorReport.detail}")
                             }
                             return@withContext
                         }
                         failCount++
-                        sourceBitmap // 失败回退
+                        sourceBitmap // 失败回退到原图
                     }
 
                     if (processedBitmap != sourceBitmap) {
@@ -261,6 +265,102 @@ class BatchAiProcessor {
 
             withContext(Dispatchers.Main) { listener.onComplete(results) }
         }
+    }
+
+    // 【新增】错误诊断类
+    private data class ErrorReport(val title: String, val detail: String, val isFatal: Boolean) {
+        val message: String get() = "$title\n$detail"
+    }
+
+    // 【新增】详细的错误诊断逻辑
+    private fun diagnoseError(e: Throwable, fileName: String): ErrorReport {
+        val msg = e.message ?: "Unknown Error"
+        val cause = e.cause
+
+        // 1. 网络连接类错误 (Network is Unreachable 通常在这里)
+        if (e is SocketException || msg.contains("Unreachable", ignoreCase = true) || msg.contains("EHOSTUNREACH")) {
+            return ErrorReport(
+                "【网络通信异常】",
+                "系统提示 'Network is unreachable'。\n原因：应用无法连接到 AI 服务器。\n建议：\n1. 请检查您的 VPN/代理 是否开启。\n2. 确保 EhViewer 已加入分应用代理名单。\n3. 尝试切换代理节点。",
+                true
+            )
+        }
+        if (e is UnknownHostException) {
+            return ErrorReport(
+                "【网络 DNS 错误】",
+                "无法解析服务器地址。\n建议：检查网络连接或 DNS 设置。",
+                true
+            )
+        }
+        if (e is SocketTimeoutException || e is InterruptedIOException) {
+            return ErrorReport(
+                "【网络请求超时】",
+                "AI 服务器响应时间过长。\n建议：网络状况不佳，请尝试切换节点或稍后重试。",
+                false
+            )
+        }
+        if (e is SSLException) {
+            return ErrorReport(
+                "【SSL 安全连接失败】",
+                "无法建立安全连接。\n建议：检查代理设置或系统时间。",
+                true
+            )
+        }
+
+        // 2. API 业务类错误
+        if (msg.contains("401")) {
+            return ErrorReport(
+                "【API 认证失败 (401)】",
+                "API Key 无效或已过期。\n建议：检查设置中的 API Key。",
+                true
+            )
+        }
+        if (msg.contains("429")) {
+            return ErrorReport(
+                "【API 配额超限 (429)】",
+                "请求过于频繁或配额已用尽。\n建议：稍后重试或检查账户余额。",
+                false
+            )
+        }
+        if (msg.contains("400") || msg.contains("INVALID_ARGUMENT")) {
+            return ErrorReport(
+                "【API 参数错误 (400)】",
+                "模型不支持该图片或参数。\n建议：检查是否选择了正确的模型名称。",
+                false
+            )
+        }
+
+        // 3. 文件存储类错误
+        if (e is IOException) {
+            if (msg.contains("EPERM") || msg.contains("EACCES")) {
+                return ErrorReport(
+                    "【存储权限被拒绝】",
+                    "无法写入文件: $fileName。\n建议：请检查应用的文件存储权限。",
+                    true
+                )
+            }
+            if (msg.contains("EROFS")) {
+                return ErrorReport(
+                    "【存储只读错误】",
+                    "文件系统为只读状态。\n建议：检查存储卡状态。",
+                    true
+                )
+            }
+            if (msg.contains("ENOSPC")) {
+                return ErrorReport(
+                    "【存储空间不足】",
+                    "剩余空间不足以保存图片。\n建议：清理手机存储空间。",
+                    true
+                )
+            }
+        }
+
+        // 4. 其他错误
+        return ErrorReport(
+            "【未分类异常】",
+            "发生了未预期的错误: $msg\n位置: $fileName",
+            false
+        )
     }
 
     private suspend fun prepareTargetGallery(
@@ -293,7 +393,6 @@ class BatchAiProcessor {
             }
             if (existing != null) {
                 val existingName = existing.name ?: ""
-                // 忽略包含换行符的旧目录
                 if (existingName.contains("\n") || existingName.contains("\r")) {
                     Log.w("BatchAi", "Ignoring dirty directory: $existingName")
                 } else {
@@ -325,8 +424,8 @@ class BatchAiProcessor {
                 }
             } else if (initialProvider != null) {
                 for (i in 0 until initialProvider.size) {
-                    // 【关键修复】这里必须进行文件名清洗
                     val rawName = initialProvider.getName(i)
+                    // 强制清洗文件名，防止任何可能的非法字符
                     val safeName = FileUtils.sanitizeFilename(rawName).let {
                         if (it.isBlank()) "image_$i.jpg" else it
                     }
@@ -344,7 +443,6 @@ class BatchAiProcessor {
     }
 
     private fun copyFile(src: DocumentFile, destDir: DocumentFile) {
-        // 【关键修复】复制文件时同样清洗文件名
         val rawName = src.name ?: "temp"
         val safeName = FileUtils.sanitizeFilename(rawName)
 
@@ -360,7 +458,6 @@ class BatchAiProcessor {
         }
     }
 
-    // ... (createImageProvider, saveBitmapToUri, saveProgress, registerAsDownload, enum classes 保持不变) ...
     private fun createImageProvider(info: DownloadInfo): ImageProvider? {
         val dirUri = info.downloadDir?.toUri()
         val archiveUri = info.archiveFile?.toUri()
@@ -373,10 +470,13 @@ class BatchAiProcessor {
     }
 
     private fun saveBitmapToUri(dir: DocumentFile, name: String, bitmap: Bitmap) {
-        val file = dir.findFile(name) ?: dir.createFile("image/jpeg", name) ?: return
+        // 使用清洗后的文件名查找或创建，确保一致性
+        val safeName = FileUtils.sanitizeFilename(name).let { if (it.isBlank()) "processed_image.jpg" else it }
+        val file = dir.findFile(safeName) ?: dir.createFile("image/jpeg", safeName) ?: throw IOException("无法创建文件: $safeName")
+
         appCtx.contentResolver.openOutputStream(file.uri, "wt")?.use {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)
-        }
+        } ?: throw IOException("无法打开文件输出流: $safeName")
     }
 
     private fun saveProgress(dir: DocumentFile, index: Int) {
