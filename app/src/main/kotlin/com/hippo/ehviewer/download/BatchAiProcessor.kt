@@ -19,6 +19,7 @@ import com.hippo.ehviewer.util.GeminiManager
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.io.IOException
 import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -45,7 +46,7 @@ class BatchAiProcessor {
         private val docFile = DocumentFile.fromTreeUri(context, dirUri)
             ?: DocumentFile.fromFile(File(dirUri.path!!))
 
-        // 过滤掉隐藏文件和非图片文件，防止 .ai_progress 等文件干扰索引
+        // 过滤掉隐藏文件和非图片文件
         private val files = docFile.listFiles().filter { file ->
             val name = file.name?.lowercase().orEmpty()
             !name.startsWith(".") && (name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".jpeg") || name.endsWith(".webp"))
@@ -156,14 +157,12 @@ class BatchAiProcessor {
             var previousResultInfo: DownloadInfo? = null
 
             for (task in tasks) {
-                // 如果是链式第二步，应该基于上一步的结果作为源
                 val currentSourceProvider = if (task == ProcessTarget.TranslateFromColor && previousResultInfo != null) {
                     null
                 } else {
                     initialProvider
                 }
 
-                // 2. 准备目标画廊
                 val targetDir = prepareTargetGallery(sourceInfo, task, currentSourceProvider, previousResultInfo)
 
                 if (targetDir == null) {
@@ -171,12 +170,10 @@ class BatchAiProcessor {
                     return@withContext
                 }
 
-                // 3. 注册到列表
                 val downloadInfo = registerAsDownload(targetDir, sourceInfo.findBaseInfo(), task)
                 results.add(downloadInfo)
                 previousResultInfo = downloadInfo
 
-                // 4. 读取断点进度
                 val progressFile = targetDir.findFile(".ai_progress")
                 val startIndex = try {
                     if (progressFile != null) {
@@ -184,7 +181,6 @@ class BatchAiProcessor {
                     } else 0
                 } catch (e: Exception) { 0 }
 
-                // 5. 准备处理
                 val workingProvider = DirImageProvider(appCtx, targetDir.uri)
                 val total = workingProvider.size
 
@@ -211,35 +207,50 @@ class BatchAiProcessor {
 
                     val prompt = if (task == ProcessTarget.ColorOnly) GeminiManager.PROMPT_COLORIZE else GeminiManager.PROMPT_TRANSLATE
 
-                    val resultBitmap = try {
+                    // 【关键修复】将 saveBitmapToUri 移入 try 块，并区分错误类型
+                    val processedBitmap = try {
                         val result = AiManagers.processBitmap(sourceBitmap, prompt, config)
-                        result.getOrThrow()
+                        val bitmap = result.getOrThrow()
+
+                        // 尝试保存（如果文件名有问题，这里会抛出 IOException）
+                        saveBitmapToUri(targetDir, fileName, bitmap)
+                        saveProgress(targetDir, index + 1)
+                        bitmap
                     } catch (e: Throwable) {
                         Log.e("BatchAi", "Page $index error", e)
-
                         val errMsg = e.message ?: "Unknown Error"
-                        // 针对性提示 Unreachable 错误
-                        if (errMsg.contains("Unreachable")) {
+
+                        // 区分网络错误和文件错误
+                        val isNetworkUnreachable = errMsg.contains("Unreachable", ignoreCase = true) ||
+                                e is java.net.SocketException ||
+                                e is java.net.UnknownHostException
+
+                        if (isNetworkUnreachable) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("遇到底层错误(Unreachable)，通常是由于文件名包含非法字符。已尝试修复，请重试任务。")
+                                listener.onError("网络连接失败(Unreachable)。请检查VPN连接或代理设置。")
+                            }
+                            return@withContext
+                        }
+
+                        // 如果是保存文件时的错误（通常不会触发，因为我们在 prepare 时已经清洗了文件名，但以防万一）
+                        if (e is IOException && errMsg.contains("EPERM") || errMsg.contains("EROFS")) {
+                            withContext(Dispatchers.Main) {
+                                listener.onError("文件保存失败: $fileName。请检查存储权限。")
                             }
                             return@withContext
                         }
 
                         if (failCount > 4) {
                             withContext(Dispatchers.Main) {
-                                listener.onError("连续失败多次，任务暂停。进度已保存。错误: $errMsg")
+                                listener.onError("连续多次处理失败，任务暂停。错误: $errMsg")
                             }
                             return@withContext
                         }
                         failCount++
-                        sourceBitmap // 失败则回退原图
+                        sourceBitmap // 失败回退
                     }
 
-                    saveBitmapToUri(targetDir, fileName, resultBitmap)
-                    saveProgress(targetDir, index + 1)
-
-                    if (resultBitmap != sourceBitmap) {
+                    if (processedBitmap != sourceBitmap) {
                         delay(1000)
                         failCount = 0
                     }
@@ -264,34 +275,25 @@ class BatchAiProcessor {
             ProcessTarget.TranslateFromColor -> "[AI-Color+TL]"
         }
 
-        // 【文件名清洗】移除换行符等非法字符，防止 Unreachable 错误
         val rawTitle = sourceInfo.title ?: sourceInfo.gid.toString()
-        // 替换掉所有不可见字符和换行符，并截断长度
         val cleanTitle = rawTitle.replace(Regex("[\\x00-\\x1F\\x7F]+"), " ").trim().take(64)
         val newTitle = "$suffix $cleanTitle"
         val safeDirName = FileUtils.sanitizeFilename(newTitle)
 
-        // 【核心修正】直接访问 downloadLocation，不需要 DownloadManager. 前缀
         val downloadDirUri = downloadLocation.toUri()
-
         val rootDoc = DocumentFile.fromTreeUri(appCtx, downloadDirUri)
             ?: DocumentFile.fromFile(File(downloadDirUri.path ?: Environment.getExternalStorageDirectory().path))
 
-        // 【智能查找】优先查找名字干净的现有目录
         var targetDir = rootDoc.findFile(safeDirName)
 
-        // 如果没找到，尝试进行模糊匹配（兼容旧版本或脏名字）
         if (targetDir == null) {
             val searchKey = "${sourceInfo.gid}"
             val existing = rootDoc.listFiles().find {
-                it.isDirectory &&
-                        (it.name?.contains(suffix) == true) &&
-                        (it.name?.contains(searchKey) == true)
+                it.isDirectory && (it.name?.contains(suffix) == true) && (it.name?.contains(searchKey) == true)
             }
-            // 如果找到了旧目录，判断是否复用
             if (existing != null) {
                 val existingName = existing.name ?: ""
-                // 如果旧目录名包含换行符，视为"脏目录"，不复用，强制新建（这样就能解决 Unreachable 问题）
+                // 忽略包含换行符的旧目录
                 if (existingName.contains("\n") || existingName.contains("\r")) {
                     Log.w("BatchAi", "Ignoring dirty directory: $existingName")
                 } else {
@@ -311,7 +313,6 @@ class BatchAiProcessor {
             Log.i("BatchAi", "Initializing target dir: ${targetDir.name}")
             if (task == ProcessTarget.TranslateFromColor && previousResult != null) {
                 val prevUri = previousResult.downloadDir?.toUri()
-                // 确保我们能获取到上一步的 DocumentFile
                 if (prevUri != null) {
                     val prevDoc = DocumentFile.fromTreeUri(appCtx, prevUri)
                         ?: DocumentFile.fromFile(File(prevUri.path ?: ""))
@@ -324,9 +325,8 @@ class BatchAiProcessor {
                 }
             } else if (initialProvider != null) {
                 for (i in 0 until initialProvider.size) {
-                    // 【修复核心】获取原始文件名并强制清洗
+                    // 【关键修复】这里必须进行文件名清洗
                     val rawName = initialProvider.getName(i)
-                    // 使用 FileUtils.sanitizeFilename 清洗文件名，如果清洗后为空则生成默认名
                     val safeName = FileUtils.sanitizeFilename(rawName).let {
                         if (it.isBlank()) "image_$i.jpg" else it
                     }
@@ -344,7 +344,7 @@ class BatchAiProcessor {
     }
 
     private fun copyFile(src: DocumentFile, destDir: DocumentFile) {
-        // 【修复】复制文件时也进行文件名清洗
+        // 【关键修复】复制文件时同样清洗文件名
         val rawName = src.name ?: "temp"
         val safeName = FileUtils.sanitizeFilename(rawName)
 
@@ -360,6 +360,7 @@ class BatchAiProcessor {
         }
     }
 
+    // ... (createImageProvider, saveBitmapToUri, saveProgress, registerAsDownload, enum classes 保持不变) ...
     private fun createImageProvider(info: DownloadInfo): ImageProvider? {
         val dirUri = info.downloadDir?.toUri()
         val archiveUri = info.archiveFile?.toUri()
